@@ -8,7 +8,6 @@ namespace JayT.UnityAvatarTools.Editor
     public class CopyAvatarBoneTransform : EditorWindow
     {
         [SerializeField] private Animator sourceAvatar;
-        [SerializeField] private Animator targetAvatar;
         [SerializeField] private Transform sourceArmature;
         [SerializeField] private Transform targetArmature;
         [SerializeField] private List<SkinnedMeshRenderer> sourceSkinnedMeshes = new List<SkinnedMeshRenderer>();
@@ -35,7 +34,6 @@ namespace JayT.UnityAvatarTools.Editor
             
             EditorGUILayout.Space();
             
-            targetAvatar = (Animator)EditorGUILayout.ObjectField("Target Avatar", targetAvatar, typeof(Animator), true);
             targetArmature = (Transform)EditorGUILayout.ObjectField("Target Armature", targetArmature, typeof(Transform), true);
 
             EditorGUILayout.Space();
@@ -92,79 +90,79 @@ namespace JayT.UnityAvatarTools.Editor
             }
         }
 
-private void CopyBoneTransforms()
-{
-    if (sourceAvatar == null || targetAvatar == null)
-    {
-        EditorUtility.DisplayDialog("Error", "Source and Target avatars must be assigned.", "OK");
-        return;
-    }
-
-    if (!sourceAvatar.isHuman || !targetAvatar.isHuman)
-    {
-        EditorUtility.DisplayDialog("Error", "Both avatars must be Humanoid.", "OK");
-        return;
-    }
-
-    // Copy Armature if specified
-    if (sourceArmature != null && targetArmature != null)
-    {
-        CopyTransformAndScaleAdjuster(sourceArmature, targetArmature);
-    }
-
-    // Copy Humanoid bones
-    var humanBones = System.Enum.GetValues(typeof(HumanBodyBones));
-
-    foreach (HumanBodyBones bone in humanBones)
-    {
-        if (bone == HumanBodyBones.LastBone) continue;
-
-        Transform sourceBone = sourceAvatar.GetBoneTransform(bone);
-        
-        if (sourceBone != null)
+        private void CopyBoneTransforms()
         {
-            // sourceBoneの名前を取得
-            string boneName = sourceBone.gameObject.name;
-            
-            // targetAvatarのArmature配下から同じ名前のボーンを検索
-            Transform targetBone = FindBoneByName(targetArmature != null ? targetArmature : targetAvatar.transform, boneName);
-            
-            if (targetBone != null)
+            if (sourceAvatar == null || targetArmature == null)
             {
-                CopyTransformAndScaleAdjuster(sourceBone, targetBone);
+                EditorUtility.DisplayDialog("Error", "Source Avatar and Target Armature must be assigned.", "OK");
+                return;
+            }
+
+            if (!sourceAvatar.isHuman)
+            {
+                EditorUtility.DisplayDialog("Error", "Source avatar must be Humanoid.", "OK");
+                return;
+            }
+
+            // Copy Armature if specified
+            if (sourceArmature != null && targetArmature != null)
+            {
+                CopyTransformAndScaleAdjuster(sourceArmature, targetArmature);
+            }
+
+            // Copy Humanoid bones
+            var humanBones = System.Enum.GetValues(typeof(HumanBodyBones));
+
+            foreach (HumanBodyBones bone in humanBones)
+            {
+                if (bone == HumanBodyBones.LastBone) continue;
+
+                Transform sourceBone = sourceAvatar.GetBoneTransform(bone);
+                
+                if (sourceBone != null)
+                {
+                    // sourceBoneの名前を取得
+                    string boneName = sourceBone.gameObject.name;
+                    
+                    // targetAvatarのArmature配下から同じ名前のボーンを検索
+                    Transform targetBone = FindBoneByName(targetArmature != null ? targetArmature : targetArmature.transform, boneName);
+                    
+                    if (targetBone != null)
+                    {
+                        CopyTransformAndScaleAdjuster(sourceBone, targetBone);
+                    }
+                }
+            }
+
+            // Copy BlendShapes
+            for (int i = 0; i < skinnedMeshCount; i++)
+            {
+                if (sourceSkinnedMeshes[i] != null && targetSkinnedMeshes[i] != null)
+                {
+                    CopyBlendShapes(sourceSkinnedMeshes[i], targetSkinnedMeshes[i]);
+                }
             }
         }
-    }
 
-    // Copy BlendShapes
-    for (int i = 0; i < skinnedMeshCount; i++)
-    {
-        if (sourceSkinnedMeshes[i] != null && targetSkinnedMeshes[i] != null)
+        // ボーン名で検索するヘルパーメソッド
+        private Transform FindBoneByName(Transform root, string boneName)
         {
-            CopyBlendShapes(sourceSkinnedMeshes[i], targetSkinnedMeshes[i]);
+            if (root.name == boneName)
+            {
+                return root;
+            }
+
+            foreach (Transform child in root)
+            {
+                Transform found = FindBoneByName(child, boneName);
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+
+            return null;
         }
-    }
-}
-
-// ボーン名で検索するヘルパーメソッド
-private Transform FindBoneByName(Transform root, string boneName)
-{
-    if (root.name == boneName)
-    {
-        return root;
-    }
-
-    foreach (Transform child in root)
-    {
-        Transform found = FindBoneByName(child, boneName);
-        if (found != null)
-        {
-            return found;
-        }
-    }
-
-    return null;
-}
 
         private void CopyTransformAndScaleAdjuster(Transform source, Transform target)
         {
