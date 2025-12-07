@@ -1,3 +1,4 @@
+// Improved IFacialMocapReceiver with proactive handshake (UDP) and optional TCP mode
 using UnityEngine;
 using System;
 using System.Net;
@@ -10,316 +11,352 @@ using System.Linq;
 namespace JayT.UnityAvatarTools.Facial
 {
     /// <summary>
-    /// iFacialMocap UDP レシーバー
-    /// ARKitの52個のBlendShapeパラメータを受信
+    /// iFacialMocap receiver for Unity
+    /// - Supports UDP (default) by sending magic string to iPhone:49983
+    /// - Supports optional TCP mode (send UDPTCP magic then listen on TCP port 49986)
+    /// See official docs: https://www.ifacialmocap.com/for-developer/
     /// </summary>
     public class IFacialMocapReceiver : MonoBehaviour
     {
         [Header("Network Settings")]
-        [SerializeField] private int receivePort = 49983;
-        
-        [Header("PC IP Address (iFacialMocapに入力)")]
-        [SerializeField] private string localIPAddress = "";
-        
+        [SerializeField] private int receivePort = 49983; // local UDP receive port (default)
+        [SerializeField] private string remoteIP = "";   // iPhone IP (set this in inspector)
+        [SerializeField] private bool useTCP = false;      // if true, request TCP mode (then listen on TCP port 49986)
+
         [Header("Debug")]
         [SerializeField] private bool showDebugLog = false;
-        
-        // BlendShapeデータ
+
+        [Header("Connection Status")]
+        [SerializeField] private bool isConnected = false;
+        [SerializeField] private string lastReceivedTime = "未接続";
+        [SerializeField] private int receivedPacketCount = 0;
+
         private Dictionary<string, float> blendShapeValues = new Dictionary<string, float>();
-        
-        // Head Transform
         private Vector3 headPosition = Vector3.zero;
         private Quaternion headRotation = Quaternion.identity;
-        
-        // Threading
-        private UdpClient udpClient;
-        private Thread receiveThread;
-        private bool isRunning = false;
-        
-        // Thread-safe data exchange
+
+        // Networking
+        private UdpClient udpListener;      // listens for incoming UDP frames (when using UDP)
+        private UdpClient udpSender;        // used to send magic handshake to iPhone
+        private Thread udpReceiveThread;
+        private volatile bool isRunning = false;
+
+        // TCP
+        private TcpListener tcpListener;
+        private Thread tcpAcceptThread;
+        private Thread tcpReceiveThread;
+
         private readonly object lockObject = new object();
         private bool hasNewData = false;
 
+        // config constants from official docs
+        private const int iPhonePort = 49983;
+        private const int pcTcpPort = 49986;
+        private const string udpMagic = "iFacialMocap_sahuasouryya9218sauhuiayeta91555dy3719";
+        private const string udptcpMagic = "iFacialMocap_UDPTCP_sahuasouryya9218sauhuiayeta91555dy3719";
+        private const string tcpFrameDelimiter = "___iFacialMocap"; // used for TCP framing per docs
+
         void OnValidate()
         {
-            // EditorでローカルIPアドレスを自動取得して表示
-            UpdateLocalIPAddress();
+            // nothing heavy here; keep inspector responsive
+            if (string.IsNullOrEmpty(remoteIP)) remoteIP = "";
         }
 
         void Start()
         {
-            UpdateLocalIPAddress();
-            InitializeReceiver();
+            if (string.IsNullOrEmpty(remoteIP))
+            {
+                Debug.LogWarning("IFacialMocapReceiver: remoteIP is empty. Set the iPhone's IP address in the inspector.");
+                return;
+            }
+
+            InitializeNetworking();
         }
 
         void OnDestroy()
         {
-            StopReceiver();
+            StopNetworking();
         }
 
-        private void UpdateLocalIPAddress()
+        private void InitializeNetworking()
         {
             try
             {
-                localIPAddress = FetchLocalIPAddress();
+                udpSender = new UdpClient();
+
+                // Start UDP listener if using UDP mode
+                if (!useTCP)
+                {
+                    udpListener = new UdpClient(receivePort);
+                    isRunning = true;
+                    udpReceiveThread = new Thread(UDPReceiveLoop) { IsBackground = true };
+                    udpReceiveThread.Start();
+
+                    // proactively send magic string to iPhone to request UDP streaming
+                    SendUdpMagic(udpMagic, iPhonePort);
+
+                    Debug.Log($"IFacialMocapReceiver: UDP mode. Listening on port {receivePort}, requested iPhone {remoteIP}:{iPhonePort}");
+                }
+                else
+                {
+                    // In TCP mode: send udptcp magic to request iOS to open TCP connection back to PC:49986
+                    tcpListener = new TcpListener(IPAddress.Any, pcTcpPort);
+                    tcpListener.Start();
+
+                    tcpAcceptThread = new Thread(TcpAcceptLoop) { IsBackground = true };
+                    tcpAcceptThread.Start();
+
+                    SendUdpMagic(udptcpMagic, iPhonePort);
+
+                    Debug.Log($"IFacialMocapReceiver: TCP mode requested. TCP listening on {pcTcpPort}, sent UDPTCP request to {remoteIP}:{iPhonePort}");
+                }
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"Failed to get local IP address: {e.Message}");
-                localIPAddress = "IP取得失敗";
+                Debug.LogError($"IFacialMocapReceiver InitializeNetworking failed: {e.Message}");
             }
         }
 
-        private string FetchLocalIPAddress()
-        {
-            var host = Dns.GetHostEntry(Dns.GetHostName());
-            
-            // IPv4アドレスを優先的に取得
-            var ipAddresses = host.AddressList
-                .Where(ip => ip.AddressFamily == AddressFamily.InterNetwork)
-                .ToList();
-            
-            if (ipAddresses.Count == 0)
-            {
-                return "IPアドレスが見つかりません";
-            }
-            
-            // ループバックアドレス以外を優先
-            var nonLoopback = ipAddresses.FirstOrDefault(ip => !IPAddress.IsLoopback(ip));
-            if (nonLoopback != null)
-            {
-                return nonLoopback.ToString();
-            }
-            
-            return ipAddresses[0].ToString();
-        }
-
-        private void InitializeReceiver()
-        {
-            try
-            {
-                udpClient = new UdpClient(receivePort);
-                isRunning = true;
-                
-                receiveThread = new Thread(ReceiveData);
-                receiveThread.IsBackground = true;
-                receiveThread.Start();
-                
-                Debug.Log($"iFacialMocap Receiver started on port {receivePort}");
-                Debug.Log($"iFacialMocapアプリに入力するIPアドレス: {localIPAddress}");
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"Failed to start receiver: {e.Message}");
-            }
-        }
-
-        private void StopReceiver()
+        private void StopNetworking()
         {
             isRunning = false;
-            
-            if (receiveThread != null && receiveThread.IsAlive)
-            {
-                receiveThread.Abort();
-            }
-            
-            if (udpClient != null)
-            {
-                udpClient.Close();
-            }
-            
-            Debug.Log("iFacialMocap Receiver stopped");
+
+            try { udpReceiveThread?.Interrupt(); } catch {};
+            try { tcpAcceptThread?.Interrupt(); } catch {};
+            try { tcpReceiveThread?.Interrupt(); } catch {};
+
+            udpListener?.Close();
+            udpSender?.Close();
+
+            try { tcpListener?.Stop(); } catch {};
+
+            Debug.Log("IFacialMocapReceiver: stopped");
         }
 
-        private void ReceiveData()
+        private void SendUdpMagic(string magic, int port)
         {
+            try
+            {
+                byte[] b = Encoding.UTF8.GetBytes(magic);
+                udpSender.Send(b, b.Length, remoteIP, port);
+                if (showDebugLog) Debug.Log($"Sent magic to {remoteIP}:{port} -> {magic}");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"Failed to send magic: {e.Message}");
+            }
+        }
+
+        // UDP receive loop - simple packet-per-frame
+        private void UDPReceiveLoop()
+        {
+            IPEndPoint anyEP = new IPEndPoint(IPAddress.Any, 0);
+            isRunning = true;
+
             while (isRunning)
             {
                 try
                 {
-                    IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, receivePort);
-                    byte[] data = udpClient.Receive(ref remoteEP);
-                    string message = Encoding.UTF8.GetString(data);
-                    
-                    ParseMessage(message);
+                    byte[] data = udpListener.Receive(ref anyEP);
+                    string msg = Encoding.UTF8.GetString(data);
+
+                    if (showDebugLog) Debug.Log($"UDP recv {anyEP.Address}:{anyEP.Port} len={data.Length}");
+
+                    HandleIncomingMessage(msg);
                 }
+                catch (SocketException se)
+                {
+                    if (showDebugLog) Debug.LogWarning($"UDP socket closed or error: {se.Message}");
+                    break;
+                }
+                catch (ThreadInterruptedException) { break; }
                 catch (Exception e)
                 {
-                    if (isRunning)
-                    {
-                        Debug.LogError($"Receive error: {e.Message}");
-                    }
+                    Debug.LogError($"UDPReceiveLoop error: {e.Message}");
                 }
             }
         }
 
-        private void ParseMessage(string message)
+        // TCP accept loop: accept one connection then spawn receive thread
+        private void TcpAcceptLoop()
         {
-            string[] parts = message.Split('|');
-            
-            if (parts.Length < 2)
+            while (true)
             {
+                try
+                {
+                    TcpClient client = tcpListener.AcceptTcpClient();
+                    if (showDebugLog) Debug.Log($"TCP client connected from {client.Client.RemoteEndPoint}");
+
+                    // start receive loop for this client
+                    tcpReceiveThread = new Thread(() => TcpReceiveLoop(client)) { IsBackground = true };
+                    tcpReceiveThread.Start();
+
+                    break; // for simplicity accept one connection
+                }
+                catch (SocketException se)
+                {
+                    Debug.LogWarning($"TCP accept error: {se.Message}");
+                    break;
+                }
+                catch (ThreadInterruptedException) { break; }
+            }
+        }
+
+        // Read from TCP stream, split frames by delimiter
+        private void TcpReceiveLoop(TcpClient client)
+        {
+            try
+            {   var stream = client.GetStream();
+                byte[] buffer = new byte[8192];
+                StringBuilder sb = new StringBuilder();
+
+                while (client.Connected)
+                {
+                    int read = stream.Read(buffer, 0, buffer.Length);
+                    if (read <= 0) break;
+
+                    string chunk = Encoding.UTF8.GetString(buffer, 0, read);
+                    sb.Append(chunk);
+
+                    string s = sb.ToString();
+                    int idx;
+                    while ((idx = s.IndexOf(tcpFrameDelimiter, StringComparison.Ordinal)) >= 0)
+                    {
+                        string frame = s.Substring(0, idx);
+                        HandleIncomingMessage(frame);
+
+                        s = s.Substring(idx + tcpFrameDelimiter.Length);
+                    }
+
+                    sb.Clear();
+                    sb.Append(s);
+                }
+
+                if (showDebugLog) Debug.Log("TCP client disconnected");
+                client.Close();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"TcpReceiveLoop error: {e.Message}");
+            }
+        }
+
+        // Common handler for incoming messages (UDP single packets or TCP framed JSON/text)
+        private void HandleIncomingMessage(string message)
+        {
+            if (string.IsNullOrEmpty(message)) return;
+
+            // messages from iFacialMocap typically start with types like iFacialMocap_head or iFacialMocap_blendShapes
+            if (message.StartsWith("iFacialMocap_request") )
+            {
+                // older/other implementations may send requests; respond with OK if needed
+                if (showDebugLog) Debug.Log("Received request message");
                 return;
             }
 
-            string messageType = parts[0];
-
+            // Quick sanity: update connection timestamp
             lock (lockObject)
             {
-                switch (messageType)
-                {
-                    case "iFacialMocap_head":
-                        ParseHeadData(parts);
-                        break;
-                        
-                    case "iFacialMocap_blendShapes":
-                        ParseBlendShapeData(parts);
-                        break;
-                }
-                
+                isConnected = true;
+                lastReceivedTime = DateTime.Now.ToString("HH:mm:ss");
+                receivedPacketCount++;
                 hasNewData = true;
+            }
+
+            // iFacialMocap UDP frames use '|' and '&' as in your original parser
+            ParseMessage(message);
+        }
+
+        private void ParseMessage(string message)
+        {
+            var parts = message.Split('|');
+            if (parts.Length == 0) return;
+
+            string type = parts[0];
+
+            switch (type)
+            {
+                case "iFacialMocap_head":
+                    ParseHeadData(parts);
+                    break;
+                case "iFacialMocap_blendShapes":
+                    ParseBlendShapeData(parts);
+                    break;
+                default:
+                    if (showDebugLog) Debug.Log($"Unhandled message type: {type}");
+                    break;
             }
         }
 
         private void ParseHeadData(string[] parts)
         {
-            // Format: iFacialMocap_head|rx|ry|rz|x|y|z
-            if (parts.Length < 7)
-            {
-                return;
-            }
+            if (parts.Length < 7) return;
+            if (!float.TryParse(parts[1], out float rx)) return;
+            if (!float.TryParse(parts[2], out float ry)) return;
+            if (!float.TryParse(parts[3], out float rz)) return;
+            if (!float.TryParse(parts[4], out float x)) return;
+            if (!float.TryParse(parts[5], out float y)) return;
+            if (!float.TryParse(parts[6], out float z)) return;
 
-            try
+            lock (lockObject)
             {
-                float rx = float.Parse(parts[1]);
-                float ry = float.Parse(parts[2]);
-                float rz = float.Parse(parts[3]);
-                float x = float.Parse(parts[4]);
-                float y = float.Parse(parts[5]);
-                float z = float.Parse(parts[6]);
-
-                // Unityの座標系に変換（必要に応じて調整）
                 headRotation = Quaternion.Euler(rx, ry, rz);
                 headPosition = new Vector3(x, y, z);
-
-                if (showDebugLog)
-                {
-                    Debug.Log($"Head - Pos: {headPosition}, Rot: {headRotation.eulerAngles}");
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning($"Failed to parse head data: {e.Message}");
             }
         }
 
         private void ParseBlendShapeData(string[] parts)
         {
-            // Format: iFacialMocap_blendShapes|key1&value1|key2&value2|...
-            for (int i = 1; i < parts.Length; i++)
+            lock (lockObject)
             {
-                string[] keyValue = parts[i].Split('&');
-                if (keyValue.Length == 2)
+                for (int i = 1; i < parts.Length; i++)
                 {
-                    try
-                    {
-                        string key = keyValue[0];
-                        float value = float.Parse(keyValue[1]);
-                        
-                        blendShapeValues[key] = value;
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.LogWarning($"Failed to parse blend shape: {e.Message}");
-                    }
-                }
-            }
+                    var kv = parts[i].Split('&');
+                    if (kv.Length != 2) continue;
 
-            if (showDebugLog)
-            {
-                Debug.Log($"Received {blendShapeValues.Count} blend shapes");
+                    if (float.TryParse(kv[1], out float v))
+                        blendShapeValues[kv[0]] = v;
+                }
             }
         }
 
         void Update()
         {
-            // メインスレッドで新しいデータがあるか確認
-            lock (lockObject)
+            // connection timeout check
+            if (lastReceivedTime != "未接続")
             {
-                if (hasNewData)
+                if (DateTime.TryParseExact(lastReceivedTime, "HH:mm:ss", null, System.Globalization.DateTimeStyles.None, out DateTime last))
                 {
-                    hasNewData = false;
-                    // ここで受信したデータを使用可能
+                    if ((DateTime.Now - last).TotalSeconds > 5)
+                        isConnected = false;
                 }
             }
         }
 
         #region Public API
-
-        /// <summary>
-        /// 指定したBlendShapeの値を取得
-        /// </summary>
-        public float GetBlendShapeValue(string blendShapeName)
+        public float GetBlendShapeValue(string name)
         {
-            lock (lockObject)
-            {
-                if (blendShapeValues.ContainsKey(blendShapeName))
-                {
-                    return blendShapeValues[blendShapeName];
-                }
-            }
-            return 0f;
+            lock (lockObject) { return blendShapeValues.TryGetValue(name, out float v) ? v : 0f; }
         }
 
-        /// <summary>
-        /// すべてのBlendShape値を取得
-        /// </summary>
         public Dictionary<string, float> GetAllBlendShapeValues()
         {
-            lock (lockObject)
-            {
-                return new Dictionary<string, float>(blendShapeValues);
-            }
+            lock (lockObject) { return new Dictionary<string, float>(blendShapeValues); }
         }
 
-        /// <summary>
-        /// 頭の位置を取得
-        /// </summary>
-        public Vector3 GetHeadPosition()
-        {
-            lock (lockObject)
-            {
-                return headPosition;
-            }
-        }
-
-        /// <summary>
-        /// 頭の回転を取得
-        /// </summary>
-        public Quaternion GetHeadRotation()
-        {
-            lock (lockObject)
-            {
-                return headRotation;
-            }
-        }
-
-        /// <summary>
-        /// データ受信中かどうか
-        /// </summary>
-        public bool IsReceiving()
-        {
-            return isRunning;
-        }
-
-        /// <summary>
-        /// このPCのIPアドレスを取得
-        /// </summary>
+        public Vector3 GetHeadPosition() { lock (lockObject) return headPosition; }
+        public Quaternion GetHeadRotation() { lock (lockObject) return headRotation; }
+        public bool IsReceiving() => isRunning;
         public string GetLocalIPAddress()
         {
-            return localIPAddress;
+            try
+            {
+                var host = Dns.GetHostEntry(Dns.GetHostName());
+                var ip = host.AddressList.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a));
+                return ip?.ToString() ?? "127.0.0.1";
+            }
+            catch { return "127.0.0.1"; }
         }
-
         #endregion
     }
 }
