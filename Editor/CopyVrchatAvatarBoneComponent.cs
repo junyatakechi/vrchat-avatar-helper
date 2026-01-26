@@ -15,8 +15,8 @@ namespace JayT.UnityAvatarTools.Editor
         [SerializeField] private List<SkinnedMeshRenderer> sourceSkinnedMeshes = new List<SkinnedMeshRenderer>();
         [SerializeField] private List<SkinnedMeshRenderer> targetSkinnedMeshes = new List<SkinnedMeshRenderer>();
         [SerializeField] private int skinnedMeshCount = 0;
-        [SerializeField] private bool copyPhysBones = true;
-        [SerializeField] private bool copyPhysBoneColliders = true;
+        [SerializeField] private bool copyPhysBones = false;
+        [SerializeField] private bool copyPhysBoneColliders = false;
 
         private Vector2 scrollPosition;
         private Dictionary<Transform, Transform> boneMapping = new Dictionary<Transform, Transform>();
