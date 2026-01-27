@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using nadena.dev.modular_avatar.core;
 using VRC.SDK3.Dynamics.PhysBone.Components;
 using VRC.Dynamics;
+using VRC.SDK3.Avatars.Components;
 
 namespace JayT.VRChatAvatarHelper.Editor
 {
@@ -15,6 +16,7 @@ namespace JayT.VRChatAvatarHelper.Editor
         [SerializeField] private List<SkinnedMeshRenderer> sourceSkinnedMeshes = new List<SkinnedMeshRenderer>();
         [SerializeField] private List<SkinnedMeshRenderer> targetSkinnedMeshes = new List<SkinnedMeshRenderer>();
         [SerializeField] private int skinnedMeshCount = 0;
+        [SerializeField] private bool copyAvatarDescriptor = false;
         [SerializeField] private bool copyPhysBones = false;
         [SerializeField] private bool copyPhysBoneColliders = false;
 
@@ -44,7 +46,8 @@ namespace JayT.VRChatAvatarHelper.Editor
 
             EditorGUILayout.Space();
             
-            EditorGUILayout.LabelField("PhysBone Options", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Copy Options", EditorStyles.boldLabel);
+            copyAvatarDescriptor = EditorGUILayout.Toggle("Copy Avatar Descriptor", copyAvatarDescriptor);
             copyPhysBoneColliders = EditorGUILayout.Toggle("Copy PhysBone Colliders", copyPhysBoneColliders);
             copyPhysBones = EditorGUILayout.Toggle("Copy PhysBones", copyPhysBones);
 
@@ -169,6 +172,12 @@ namespace JayT.VRChatAvatarHelper.Editor
                 {
                     CopyBlendShapes(sourceSkinnedMeshes[i], targetSkinnedMeshes[i]);
                 }
+            }
+
+            // Copy Avatar Descriptor
+            if (copyAvatarDescriptor)
+            {
+                CopyAvatarDescriptor();
             }
 
             EditorUtility.DisplayDialog("Complete", "Bone transforms copied successfully.", "OK");
@@ -414,6 +423,37 @@ namespace JayT.VRChatAvatarHelper.Editor
                     target.SetBlendShapeWeight(targetIndex, weight);
                 }
             }
+        }
+
+        private void CopyAvatarDescriptor()
+        {
+            var sourceDescriptor = sourceAvatar.GetComponent<VRCAvatarDescriptor>();
+            if (sourceDescriptor == null)
+            {
+                Debug.LogWarning("Source avatar does not have VRCAvatarDescriptor component.");
+                return;
+            }
+
+            var targetAnimator = targetArmature.GetComponentInParent<Animator>();
+            if (targetAnimator == null)
+            {
+                Debug.LogError("Target armature does not have an Animator in parent hierarchy.");
+                return;
+            }
+
+            var targetDescriptor = targetAnimator.GetComponent<VRCAvatarDescriptor>();
+            if (targetDescriptor == null)
+            {
+                targetDescriptor = targetAnimator.gameObject.AddComponent<VRCAvatarDescriptor>();
+            }
+
+            Undo.RecordObject(targetDescriptor, "Copy Avatar Descriptor");
+
+            // Use JSON serialization to copy all properties
+            string json = EditorJsonUtility.ToJson(sourceDescriptor);
+            EditorJsonUtility.FromJsonOverwrite(json, targetDescriptor);
+
+            EditorUtility.SetDirty(targetDescriptor);
         }
     }
 }
