@@ -8,7 +8,7 @@ using VRC.SDK3.Avatars.Components;
 
 namespace JayT.VRChatAvatarHelper.Editor
 {
-    public class CopyVRChatAvatarComponent : EditorWindow
+    public class CopyVRChatAvatarComponents : EditorWindow
     {
         [SerializeField] private Animator sourceAvatar;
         [SerializeField] private Transform sourceArmature;
@@ -29,7 +29,7 @@ namespace JayT.VRChatAvatarHelper.Editor
         [MenuItem("Tools/JayT/VRChatAvatarHelper/Copy VRChat Avatar Components")]
         public static void ShowWindow()
         {
-            GetWindow<CopyVRChatAvatarComponent>("Copy VRChat Avatar Components");
+            GetWindow<CopyVRChatAvatarComponents>("Copy VRChat Avatar Components");
         }
 
         private void OnGUI()
