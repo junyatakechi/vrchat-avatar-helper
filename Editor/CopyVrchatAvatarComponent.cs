@@ -8,7 +8,7 @@ using VRC.SDK3.Avatars.Components;
 
 namespace JayT.VRChatAvatarHelper.Editor
 {
-    public class CopyVrchatAvatarComponent : EditorWindow
+    public class CopyVRChatAvatarComponent : EditorWindow
     {
         [SerializeField] private Animator sourceAvatar;
         [SerializeField] private Transform sourceArmature;
@@ -26,17 +26,17 @@ namespace JayT.VRChatAvatarHelper.Editor
         private Dictionary<Transform, Transform> boneMappingAll = new Dictionary<Transform, Transform>();
         private Dictionary<VRCPhysBoneCollider, VRCPhysBoneCollider> colliderMapping = new Dictionary<VRCPhysBoneCollider, VRCPhysBoneCollider>();
 
-        [MenuItem("Tools/JayT/VRChatAvatarHelper/Copy VrchatAvatar Components")]
+        [MenuItem("Tools/JayT/VRChatAvatarHelper/Copy VRChat Avatar Components")]
         public static void ShowWindow()
         {
-            GetWindow<CopyVrchatAvatarComponent>("Copy VrchatAvatar Components");
+            GetWindow<CopyVRChatAvatarComponent>("Copy VRChat Avatar Components");
         }
 
         private void OnGUI()
         {
             scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
 
-            GUILayout.Label("Copy VrchatAvatar Components", EditorStyles.boldLabel);
+            GUILayout.Label("Copy VRChat Avatar Components", EditorStyles.boldLabel);
             EditorGUILayout.Space();
 
             sourceAvatar = (Animator)EditorGUILayout.ObjectField("Source Avatar", sourceAvatar, typeof(Animator), true);
@@ -122,41 +122,32 @@ namespace JayT.VRChatAvatarHelper.Editor
                 return;
             }
 
-            // Clear mappings
             boneMappingHumanoidOnly.Clear();
             boneMappingAll.Clear();
             colliderMapping.Clear();
 
-            // Build bone mappings
             BuildHumanoidBoneMapping();
             BuildAllBoneMapping(sourceArmature, targetArmature);
 
-            // Copy bone transforms if enabled
             if (copyBoneTransforms)
             {
-                // Copy Armature transform
                 if (sourceArmature != null && targetArmature != null)
                 {
                     CopyTransformAndScaleAdjuster(sourceArmature, targetArmature);
                 }
-
-                // Copy Humanoid bone transforms only
                 CopyHumanoidBoneTransforms();
             }
 
-            // Copy PhysBone Colliders first (PhysBones reference them)
             if (copyPhysBoneColliders)
             {
                 CopyAllPhysBoneColliders();
             }
 
-            // Copy PhysBones
             if (copyPhysBones)
             {
                 CopyAllPhysBones();
             }
 
-            // Copy BlendShapes
             for (int i = 0; i < skinnedMeshCount; i++)
             {
                 if (sourceSkinnedMeshes[i] != null && targetSkinnedMeshes[i] != null)
@@ -165,7 +156,6 @@ namespace JayT.VRChatAvatarHelper.Editor
                 }
             }
 
-            // Copy Avatar Descriptor
             if (copyAvatarDescriptor)
             {
                 CopyAvatarDescriptor();
@@ -176,13 +166,11 @@ namespace JayT.VRChatAvatarHelper.Editor
 
         private void BuildHumanoidBoneMapping()
         {
-            // Add armature mapping
             if (sourceArmature != null && targetArmature != null)
             {
                 boneMappingHumanoidOnly[sourceArmature] = targetArmature;
             }
 
-            // Map only Humanoid bones
             var humanBones = System.Enum.GetValues(typeof(HumanBodyBones));
 
             foreach (HumanBodyBones bone in humanBones)
@@ -208,10 +196,7 @@ namespace JayT.VRChatAvatarHelper.Editor
         {
             if (sourceRoot == null || targetRoot == null) return;
 
-            // Add root mapping
             boneMappingAll[sourceRoot] = targetRoot;
-
-            // Recursively build mapping for all children
             BuildAllBoneMappingRecursive(sourceRoot, targetRoot);
         }
 
@@ -266,12 +251,10 @@ namespace JayT.VRChatAvatarHelper.Editor
 
         private void CopyTransformAndScaleAdjuster(Transform source, Transform target)
         {
-            // Copy Transform
             target.localPosition = source.localPosition;
             target.localRotation = source.localRotation;
             target.localScale = source.localScale;
 
-            // Copy ModularAvatarScaleAdjuster if exists
             var sourceScaleAdjuster = source.GetComponent<ModularAvatarScaleAdjuster>();
             if (sourceScaleAdjuster != null)
             {
@@ -296,7 +279,6 @@ namespace JayT.VRChatAvatarHelper.Editor
 
                 Transform sourceTransform = sourceCollider.transform;
                 
-                // Try to find target transform in all bone mapping
                 if (boneMappingAll.TryGetValue(sourceTransform, out Transform targetTransform))
                 {
                     var targetCollider = CopyPhysBoneCollider(sourceCollider, targetTransform);
@@ -316,18 +298,15 @@ namespace JayT.VRChatAvatarHelper.Editor
         {
             if (source == null || targetTransform == null) return null;
 
-            // Get or add PhysBoneCollider component
             VRCPhysBoneCollider target = targetTransform.GetComponent<VRCPhysBoneCollider>();
             if (target == null)
             {
                 target = targetTransform.gameObject.AddComponent<VRCPhysBoneCollider>();
             }
 
-            // Copy properties using SerializedObject
             SerializedObject sourceObj = new SerializedObject(source);
             SerializedObject targetObj = new SerializedObject(target);
 
-            // Copy basic properties
             CopySerializedProperty(sourceObj, targetObj, "shapeType");
             CopySerializedProperty(sourceObj, targetObj, "insideBounds");
             CopySerializedProperty(sourceObj, targetObj, "radius");
@@ -338,7 +317,6 @@ namespace JayT.VRChatAvatarHelper.Editor
 
             targetObj.ApplyModifiedProperties();
 
-            // Remap rootTransform with null check
             if (source.rootTransform != null)
             {
                 if (boneMappingAll.TryGetValue(source.rootTransform, out Transform mappedRoot))
@@ -356,7 +334,6 @@ namespace JayT.VRChatAvatarHelper.Editor
                 target.rootTransform = null;
             }
 
-            // Mark dirty only once at the end
             EditorUtility.SetDirty(target);
 
             return target;
@@ -374,7 +351,6 @@ namespace JayT.VRChatAvatarHelper.Editor
 
                 Transform sourceTransform = sourcePhysBone.transform;
                 
-                // Try to find target transform in all bone mapping
                 if (boneMappingAll.TryGetValue(sourceTransform, out Transform targetTransform))
                 {
                     CopyPhysBone(sourcePhysBone, targetTransform);
@@ -390,7 +366,6 @@ namespace JayT.VRChatAvatarHelper.Editor
         {
             if (source == null || targetTransform == null) return;
 
-            // Get or add PhysBone component
             VRCPhysBone target = targetTransform.GetComponent<VRCPhysBone>();
             if (target == null)
             {
@@ -400,71 +375,43 @@ namespace JayT.VRChatAvatarHelper.Editor
             SerializedObject sourceObj = new SerializedObject(source);
             SerializedObject targetObj = new SerializedObject(target);
 
-            // Explicitly copy all VRCPhysBone properties (excluding references that need remapping)
+            CopyAllPhysBoneProperties(sourceObj, targetObj);
             
-            // Integration
-            CopySerializedProperty(sourceObj, targetObj, "integrationType");
-            
-            // Forces
-            CopySerializedProperty(sourceObj, targetObj, "pull");
-            CopySerializedProperty(sourceObj, targetObj, "pullCurve");
-            CopySerializedProperty(sourceObj, targetObj, "spring");
-            CopySerializedProperty(sourceObj, targetObj, "springCurve");
-            CopySerializedProperty(sourceObj, targetObj, "stiffness");
-            CopySerializedProperty(sourceObj, targetObj, "stiffnessCurve");
-            CopySerializedProperty(sourceObj, targetObj, "gravity");
-            CopySerializedProperty(sourceObj, targetObj, "gravityCurve");
-            CopySerializedProperty(sourceObj, targetObj, "gravityFalloff");
-            CopySerializedProperty(sourceObj, targetObj, "gravityFalloffCurve");
-            CopySerializedProperty(sourceObj, targetObj, "immobile");
-            CopySerializedProperty(sourceObj, targetObj, "immobileCurve");
-            CopySerializedProperty(sourceObj, targetObj, "immobileType");
-            
-            // Limits
-            CopySerializedProperty(sourceObj, targetObj, "limitType");
-            CopySerializedProperty(sourceObj, targetObj, "maxAngleX");
-            CopySerializedProperty(sourceObj, targetObj, "maxAngleXCurve");
-            CopySerializedProperty(sourceObj, targetObj, "maxAngleZ");
-            CopySerializedProperty(sourceObj, targetObj, "maxAngleZCurve");
-            CopySerializedProperty(sourceObj, targetObj, "limitRotation");
-            CopySerializedProperty(sourceObj, targetObj, "limitRotationXCurve");
-            CopySerializedProperty(sourceObj, targetObj, "limitRotationYCurve");
-            CopySerializedProperty(sourceObj, targetObj, "limitRotationZCurve");
-            
-            // Collision
-            CopySerializedProperty(sourceObj, targetObj, "radius");
-            CopySerializedProperty(sourceObj, targetObj, "radiusCurve");
-            CopySerializedProperty(sourceObj, targetObj, "allowCollision");
-            CopySerializedProperty(sourceObj, targetObj, "collisionFilter");
-            
-            // Stretch & Squish
-            CopySerializedProperty(sourceObj, targetObj, "stretchMotion");
-            CopySerializedProperty(sourceObj, targetObj, "stretchMotionCurve");
-            CopySerializedProperty(sourceObj, targetObj, "maxStretch");
-            CopySerializedProperty(sourceObj, targetObj, "maxStretchCurve");
-            CopySerializedProperty(sourceObj, targetObj, "maxSquish");
-            CopySerializedProperty(sourceObj, targetObj, "maxSquishCurve");
-            
-            // Grab & Pose
-            CopySerializedProperty(sourceObj, targetObj, "allowGrabbing");
-            CopySerializedProperty(sourceObj, targetObj, "allowPosing");
-            CopySerializedProperty(sourceObj, targetObj, "grabMovement");
-            CopySerializedProperty(sourceObj, targetObj, "snapToHand");
-            
-            // Options
-            CopySerializedProperty(sourceObj, targetObj, "parameter");
-            CopySerializedProperty(sourceObj, targetObj, "isAnimated");
-            CopySerializedProperty(sourceObj, targetObj, "resetWhenDisabled");
-            
-            // Multi-Child
-            CopySerializedProperty(sourceObj, targetObj, "multiChildType");
-            
-            // Deprecated/Legacy properties (if they exist)
-            CopySerializedProperty(sourceObj, targetObj, "version");
-            
-            targetObj.ApplyModifiedProperties();
+            RemapRootTransform(source, target);
+            RemapIgnoreTransforms(source, target);
+            RemapAndSetColliders(source, target, targetObj);
 
-            // Remap rootTransform with null check
+            targetObj.ApplyModifiedProperties();
+            EditorUtility.SetDirty(target);
+        }
+
+        private void CopyAllPhysBoneProperties(SerializedObject sourceObj, SerializedObject targetObj)
+        {
+            string[] properties = {
+                "integrationType",
+                "pull", "pullCurve", "spring", "springCurve",
+                "stiffness", "stiffnessCurve", "gravity", "gravityCurve",
+                "gravityFalloff", "gravityFalloffCurve",
+                "immobile", "immobileCurve", "immobileType",
+                "limitType", "maxAngleX", "maxAngleXCurve",
+                "maxAngleZ", "maxAngleZCurve", "limitRotation",
+                "limitRotationXCurve", "limitRotationYCurve", "limitRotationZCurve",
+                "radius", "radiusCurve", "allowCollision", "collisionFilter",
+                "stretchMotion", "stretchMotionCurve",
+                "maxStretch", "maxStretchCurve", "maxSquish", "maxSquishCurve",
+                "allowGrabbing", "allowPosing", "grabMovement", "snapToHand",
+                "parameter", "isAnimated", "resetWhenDisabled",
+                "multiChildType", "version"
+            };
+
+            foreach (var prop in properties)
+            {
+                CopySerializedProperty(sourceObj, targetObj, prop);
+            }
+        }
+
+        private void RemapRootTransform(VRCPhysBone source, VRCPhysBone target)
+        {
             if (source.rootTransform != null)
             {
                 if (boneMappingAll.TryGetValue(source.rootTransform, out Transform mappedRoot))
@@ -481,14 +428,15 @@ namespace JayT.VRChatAvatarHelper.Editor
             {
                 target.rootTransform = null;
             }
+        }
 
-            // Remap ignoreTransforms with null check
+        private void RemapIgnoreTransforms(VRCPhysBone source, VRCPhysBone target)
+        {
             target.ignoreTransforms = new List<Transform>();
             if (source.ignoreTransforms != null)
             {
                 foreach (var ignoreTransform in source.ignoreTransforms)
                 {
-                    // Skip if null
                     if (ignoreTransform == null) continue;
 
                     if (boneMappingAll.TryGetValue(ignoreTransform, out Transform mappedIgnore))
@@ -501,14 +449,15 @@ namespace JayT.VRChatAvatarHelper.Editor
                     }
                 }
             }
+        }
 
-            // Remap colliders with null check
+        private void RemapAndSetColliders(VRCPhysBone source, VRCPhysBone target, SerializedObject targetObj)
+        {
             target.colliders = new List<VRCPhysBoneColliderBase>();
             if (source.colliders != null)
             {
                 foreach (var sourceCollider in source.colliders)
                 {
-                    // Skip if null
                     if (sourceCollider == null) continue;
 
                     if (sourceCollider is VRCPhysBoneCollider collider)
@@ -525,29 +474,16 @@ namespace JayT.VRChatAvatarHelper.Editor
                 }
             }
 
-            // SerializedObjectを使ってcollidersを確実に保存
-            SerializedObject finalTargetObj = new SerializedObject(target);
-            SerializedProperty collidersProp = finalTargetObj.FindProperty("colliders");
-            
+            SerializedProperty collidersProp = targetObj.FindProperty("colliders");
             if (collidersProp != null && collidersProp.isArray)
             {
-                int colliderCount = target.colliders.Count;
-                collidersProp.arraySize = colliderCount;
-                
-                // 各要素に参照をアサイン
-                for (int i = 0; i < colliderCount; i++)
+                collidersProp.arraySize = target.colliders.Count;
+                for (int i = 0; i < target.colliders.Count; i++)
                 {
                     SerializedProperty elementProp = collidersProp.GetArrayElementAtIndex(i);
                     elementProp.objectReferenceValue = target.colliders[i];
                 }
-                
-                finalTargetObj.ApplyModifiedProperties();
-                
-                // Debug.Log($"[PhysBone] '{source.name}' -> Colliders Size: {colliderCount}, Assigned: {colliderCount}");
             }
-
-            // Mark dirty only once at the end, after all properties are set
-            EditorUtility.SetDirty(target);
         }
 
         private void CopySerializedProperty(SerializedObject source, SerializedObject target, string propertyName)
@@ -575,7 +511,6 @@ namespace JayT.VRChatAvatarHelper.Editor
                         targetProp.colorValue = sourceProp.colorValue;
                         break;
                     case SerializedPropertyType.ObjectReference:
-                        // targetProp.objectReferenceValue = sourceProp.objectReferenceValue;
                         break;
                     case SerializedPropertyType.Enum:
                         targetProp.enumValueIndex = sourceProp.enumValueIndex;
@@ -654,7 +589,6 @@ namespace JayT.VRChatAvatarHelper.Editor
 
             Undo.RecordObject(targetDescriptor, "Copy Avatar Descriptor");
 
-            // Use JSON serialization to copy all properties
             string json = EditorJsonUtility.ToJson(sourceDescriptor);
             EditorJsonUtility.FromJsonOverwrite(json, targetDescriptor);
 
