@@ -400,22 +400,68 @@ namespace JayT.VRChatAvatarHelper.Editor
             SerializedObject sourceObj = new SerializedObject(source);
             SerializedObject targetObj = new SerializedObject(target);
 
-            // Copy all serialized properties except references that need remapping
-            SerializedProperty sourceProp = sourceObj.GetIterator();
-            sourceProp.Next(true);
-
-            do
-            {
-                string propName = sourceProp.name;
-
-                // Skip properties that need special handling
-                if (propName == "m_Script" || propName == "rootTransform" || propName == "ignoreTransforms" || propName == "colliders")
-                    continue;
-
-                CopySerializedProperty(sourceObj, targetObj, propName);
-            }
-            while (sourceProp.Next(false));
-
+            // Explicitly copy all VRCPhysBone properties (excluding references that need remapping)
+            
+            // Integration
+            CopySerializedProperty(sourceObj, targetObj, "integrationType");
+            
+            // Forces
+            CopySerializedProperty(sourceObj, targetObj, "pull");
+            CopySerializedProperty(sourceObj, targetObj, "pullCurve");
+            CopySerializedProperty(sourceObj, targetObj, "spring");
+            CopySerializedProperty(sourceObj, targetObj, "springCurve");
+            CopySerializedProperty(sourceObj, targetObj, "stiffness");
+            CopySerializedProperty(sourceObj, targetObj, "stiffnessCurve");
+            CopySerializedProperty(sourceObj, targetObj, "gravity");
+            CopySerializedProperty(sourceObj, targetObj, "gravityCurve");
+            CopySerializedProperty(sourceObj, targetObj, "gravityFalloff");
+            CopySerializedProperty(sourceObj, targetObj, "gravityFalloffCurve");
+            CopySerializedProperty(sourceObj, targetObj, "immobile");
+            CopySerializedProperty(sourceObj, targetObj, "immobileCurve");
+            CopySerializedProperty(sourceObj, targetObj, "immobileType");
+            
+            // Limits
+            CopySerializedProperty(sourceObj, targetObj, "limitType");
+            CopySerializedProperty(sourceObj, targetObj, "maxAngleX");
+            CopySerializedProperty(sourceObj, targetObj, "maxAngleXCurve");
+            CopySerializedProperty(sourceObj, targetObj, "maxAngleZ");
+            CopySerializedProperty(sourceObj, targetObj, "maxAngleZCurve");
+            CopySerializedProperty(sourceObj, targetObj, "limitRotation");
+            CopySerializedProperty(sourceObj, targetObj, "limitRotationXCurve");
+            CopySerializedProperty(sourceObj, targetObj, "limitRotationYCurve");
+            CopySerializedProperty(sourceObj, targetObj, "limitRotationZCurve");
+            
+            // Collision
+            CopySerializedProperty(sourceObj, targetObj, "radius");
+            CopySerializedProperty(sourceObj, targetObj, "radiusCurve");
+            CopySerializedProperty(sourceObj, targetObj, "allowCollision");
+            CopySerializedProperty(sourceObj, targetObj, "collisionFilter");
+            
+            // Stretch & Squish
+            CopySerializedProperty(sourceObj, targetObj, "stretchMotion");
+            CopySerializedProperty(sourceObj, targetObj, "stretchMotionCurve");
+            CopySerializedProperty(sourceObj, targetObj, "maxStretch");
+            CopySerializedProperty(sourceObj, targetObj, "maxStretchCurve");
+            CopySerializedProperty(sourceObj, targetObj, "maxSquish");
+            CopySerializedProperty(sourceObj, targetObj, "maxSquishCurve");
+            
+            // Grab & Pose
+            CopySerializedProperty(sourceObj, targetObj, "allowGrabbing");
+            CopySerializedProperty(sourceObj, targetObj, "allowPosing");
+            CopySerializedProperty(sourceObj, targetObj, "grabMovement");
+            CopySerializedProperty(sourceObj, targetObj, "snapToHand");
+            
+            // Options
+            CopySerializedProperty(sourceObj, targetObj, "parameter");
+            CopySerializedProperty(sourceObj, targetObj, "isAnimated");
+            CopySerializedProperty(sourceObj, targetObj, "resetWhenDisabled");
+            
+            // Multi-Child
+            CopySerializedProperty(sourceObj, targetObj, "multiChildType");
+            
+            // Deprecated/Legacy properties (if they exist)
+            CopySerializedProperty(sourceObj, targetObj, "version");
+            
             targetObj.ApplyModifiedProperties();
 
             // Remap rootTransform with null check
@@ -477,6 +523,27 @@ namespace JayT.VRChatAvatarHelper.Editor
                         }
                     }
                 }
+            }
+
+            // SerializedObjectを使ってcollidersを確実に保存
+            SerializedObject finalTargetObj = new SerializedObject(target);
+            SerializedProperty collidersProp = finalTargetObj.FindProperty("colliders");
+            
+            if (collidersProp != null && collidersProp.isArray)
+            {
+                int colliderCount = target.colliders.Count;
+                collidersProp.arraySize = colliderCount;
+                
+                // 各要素に参照をアサイン
+                for (int i = 0; i < colliderCount; i++)
+                {
+                    SerializedProperty elementProp = collidersProp.GetArrayElementAtIndex(i);
+                    elementProp.objectReferenceValue = target.colliders[i];
+                }
+                
+                finalTargetObj.ApplyModifiedProperties();
+                
+                // Debug.Log($"[PhysBone] '{source.name}' -> Colliders Size: {colliderCount}, Assigned: {colliderCount}");
             }
 
             // Mark dirty only once at the end, after all properties are set
