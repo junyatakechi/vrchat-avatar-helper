@@ -4,7 +4,8 @@
     "references": [
         "nadena.dev.modular-avatar.core",
         "VRC.SDK3.Dynamics.PhysBone",
-        "VRC.Dynamics"
+        "VRC.Dynamics",
+        "DynamicBone"
     ],
     "includePlatforms": [
         "Editor"
