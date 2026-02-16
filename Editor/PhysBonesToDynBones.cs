@@ -1,3 +1,4 @@
+// WIP: まだ、完成度低い
 // PhysBones to Dynamic Bones Converter
 // Based on FACS01-01/PhysBone-to-DynamicBone (v2)
 // Updated for VRChat SDK 3.8+ (VRCPhysBone v1.0 / v1.1, ignoreOtherPhysBones)
@@ -10,13 +11,14 @@
 //   All colliders (Sphere / Capsule / Plane)
 //
 // Lossy:
-//   Spring(v1.0) / Momentum(v1.1)   → Damping (+Curve)  ※ 1:1 対応不可
-//   MaxAngleX                        → Stiffness (+Curve) ※ 角度→割合の近似変換
-//   Gravity + GravityFalloff         → Gravity + Force    ※ 三角関数で分解
-//   Hinge LimitType + FreezeAxis     → FreezeAxis         ※ 軸が斜めの場合はNone
+//   Spring(v1.0) / Momentum(v1.1)   → Damping (+Curve)       ※ 1:1 対応不可
+//   MaxAngleX                        → Stiffness (+Curve)      ※ 角度→割合の近似変換
+//   Stiffness(v1.1)                  → Stiffness に加算（近似）※ 概念が異なるため挙動差あり
+//   Gravity + GravityFalloff         → Gravity + Force         ※ 三角関数で分解
+//   Hinge LimitType + FreezeAxis     → FreezeAxis              ※ 軸が斜めの場合はNone
 //
 // Not converted (DBに対応項目なし):
-//   Stiffness(v1.1), Squish, Stretch, MaxStretch, MaxSquish
+//   Squish, Stretch, MaxStretch, MaxSquish
 //   Grab/Pose/Collision permissions
 //   ImmobileType = World
 //   ignoreOtherPhysBones (SDK 3.8+)
@@ -40,8 +42,7 @@ namespace JayT.VRChatAvatarHelper.Editor
         //  フィールド
         // ------------------------------------------------------------------ //
         private static GameObject _target;
-        private static bool       _makeDuplicate = true;
-        private static string     _log           = "";
+        private static string     _log = "";
 
         // Stiffness ↔ MaxAngle 変換テーブル（VRCSDK 公式値）
         private static AnimationCurve _maxAngleToStiff;
@@ -79,9 +80,6 @@ namespace JayT.VRChatAvatarHelper.Editor
 
             if (_target != null)
             {
-                _makeDuplicate = EditorGUILayout.Toggle(
-                    "複製して変換 (元を保持)", _makeDuplicate);
-
                 EditorGUILayout.Space(4);
 
                 if (GUILayout.Button("変換実行", GUILayout.Height(36)))
@@ -110,13 +108,6 @@ namespace JayT.VRChatAvatarHelper.Editor
             {
                 _log = "VRCPhysBone / VRCPhysBoneCollider が見つかりませんでした。";
                 return;
-            }
-
-            if (_makeDuplicate)
-            {
-                CreateDuplicate();
-                _pbcArray = _target.GetComponentsInChildren<VRCPhysBoneCollider>(true);
-                pbArray   = _target.GetComponentsInChildren<VRCPhysBone>(true);
             }
 
             // コライダー変換
@@ -153,8 +144,7 @@ namespace JayT.VRChatAvatarHelper.Editor
             }
 
             _log += "\n\n変換できない項目 (手動調整が必要):\n" +
-                    "  Stiffness(v1.1), Squish, Stretch,\n" +
-                    "  MaxStretch, MaxSquish,\n" +
+                    "  Squish, Stretch, MaxStretch, MaxSquish,\n" +
                     "  Grab/Pose/Collision 権限,\n" +
                     "  ImmobileType=World,\n" +
                     "  ignoreOtherPhysBones,\n" +
@@ -243,14 +233,24 @@ namespace JayT.VRChatAvatarHelper.Editor
             // ---- MaxAngleX → Stiffness ----
             ConvertAngleToStiffness(pb, db);
 
-            // ---- v1.1 専用フィールドの警告 ----
+            // ---- v1.1 専用フィールドの処理 ----
             if (pb.version == VRCPhysBoneBase.Version.Version_1_1)
             {
+                // Stiffness(v1.1) → DB Stiffness に加算（近似）
+                // PB v1.1 Stiffness は「直前フレームの向きを保持する力」
+                // DB Stiffness は「静止位置への復元力」で概念が異なるが最も近い項目
                 if (pb.stiffness > 0f)
-                    warnings.Add($"  [{pb.gameObject.name}] Stiffness(v1.1)={pb.stiffness:F3} は変換不可");
+                {
+                    db.m_Stiffness = Mathf.Clamp01(db.m_Stiffness + pb.stiffness);
+                    warnings.Add($"  [{pb.gameObject.name}] Stiffness(v1.1)={pb.stiffness:F3} → DB Stiffness に加算（近似）");
+                    warnCount++;
+                }
+
                 if (pb.maxSquish > 0f || pb.maxStretch > 1f)
+                {
                     warnings.Add($"  [{pb.gameObject.name}] Squish/Stretch は変換不可");
-                warnCount++;
+                    warnCount++;
+                }
             }
 
             // ---- コライダー参照の引き継ぎ ----
@@ -521,25 +521,6 @@ namespace JayT.VRChatAvatarHelper.Editor
             foreach (Transform t in parent)
                 if (t.gameObject != go) names.Add(t.name);
             return names.ToArray();
-        }
-
-        private void CreateDuplicate()
-        {
-            var dup  = Instantiate(_target);
-            dup.name = ObjectNames.GetUniqueName(
-                GetSiblingNames(_target),
-                _target.name + " (DynBones)");
-
-            if (_target.transform.parent != null)
-                dup.transform.SetParent(_target.transform.parent, false);
-
-            dup.transform.localPosition = _target.transform.localPosition;
-            dup.transform.localRotation = _target.transform.localRotation;
-            dup.transform.localScale    = _target.transform.localScale;
-
-            _target.SetActive(false);
-            dup.SetActive(true);
-            _target = dup;
         }
 
         // ------------------------------------------------------------------ //
