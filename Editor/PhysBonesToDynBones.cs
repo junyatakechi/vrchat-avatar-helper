@@ -4,20 +4,21 @@
 // Updated for VRChat SDK 3.8+ (VRCPhysBone v1.0 / v1.1, ignoreOtherPhysBones)
 //
 // Lossless:
-//   Pull → Elasticity (+Curve)
-//   Immobile → Inert (+Curve)
-//   Radius → Radius (+Curve, scale-corrected)
+//   Pull -> Elasticity (+Curve)
+//   Immobile -> Inert (+Curve)
+//   Radius -> Radius (+Curve, scale-corrected)
 //   Ignore Transforms, Root Transform, Enabled
 //   All colliders (Sphere / Capsule / Plane)
 //
 // Lossy:
-//   Spring(v1.0) / Momentum(v1.1)   → Damping (+Curve)       ※ 1:1 対応不可
-//   MaxAngleX                        → Stiffness (+Curve)      ※ 角度→割合の近似変換
-//   Stiffness(v1.1)                  → Stiffness に加算（近似）※ 概念が異なるため挙動差あり
-//   Gravity + GravityFalloff         → Gravity + Force         ※ 三角関数で分解
-//   Hinge LimitType + FreezeAxis     → FreezeAxis              ※ 軸が斜めの場合はNone
+//   Spring(v1.0) / Momentum(v1.1)   -> Damping (+Curve)       * 1:1 not possible
+//   MaxAngleX / Polar(Pitch,Yaw)    -> Stiffness (+Curve)      * angle-to-ratio approximation
+//   Stiffness(v1.1)                 -> Stiffness add (approx)  * different concepts
+//   Spring -> Stiffness/Elasticity partial redistribution       * shape retention补完
+//   Gravity + GravityFalloff        -> Gravity + Force          * v1.1 ratio support
+//   Hinge LimitType + FreezeAxis    -> FreezeAxis               * diagonal axis -> None
 //
-// Not converted (DBに対応項目なし):
+// Not converted (no DB equivalent):
 //   Squish, Stretch, MaxStretch, MaxSquish
 //   Grab/Pose/Collision permissions
 //   ImmobileType = World
@@ -39,27 +40,39 @@ namespace JayT.VRChatAvatarHelper.Editor
     public class PhysBonesToDynBones : EditorWindow
     {
         // ------------------------------------------------------------------ //
-        //  フィールド
+        //  Fields
         // ------------------------------------------------------------------ //
         private static GameObject _target;
         private static string     _log = "";
 
-        // Stiffness ↔ MaxAngle 変換テーブル（VRCSDK 公式値）
+        // Stiffness <-> MaxAngle conversion table (VRCSDK official values)
         private static AnimationCurve _maxAngleToStiff;
 
-        // 変換済みコライダーの対応表
+        // Converted collider mapping
         private static VRCPhysBoneCollider[]           _pbcArray;
         private static List<DynamicBoneColliderBase>   _dbcList;
 
+        // Quaternion comparison tolerance (degrees)
+        private const float QuaternionTolerance = 2f;
+
         // ------------------------------------------------------------------ //
-        //  メニュー登録
+        //  Tuning constants (adjust these during testing)
+        // ------------------------------------------------------------------ //
+        private const float SpringToStiffnessFactor     = 0.20f;
+        private const float SpringToElasticityFactor    = 0.15f;
+        private const float ImmobileToStiffnessFactor   = 0.30f;
+        private const float PullDeficitToStiffnessFactor = 0.20f;
+        private const float GravityV11Scale             = 0.05f;
+
+        // ------------------------------------------------------------------ //
+        //  Menu
         // ------------------------------------------------------------------ //
         [MenuItem("Tools/JayT/VRChatAvatarHelper/PhysBones to DynamicBones")]
         public static void ShowWindow()
         {
             _target = null;
             _log    = "";
-            GetWindow<PhysBonesToDynBones>(false, "PB → DB Converter", true);
+            GetWindow<PhysBonesToDynBones>(false, "PB -> DB Converter", true);
         }
 
         // ------------------------------------------------------------------ //
@@ -94,7 +107,7 @@ namespace JayT.VRChatAvatarHelper.Editor
         }
 
         // ------------------------------------------------------------------ //
-        //  変換メイン
+        //  Main conversion
         // ------------------------------------------------------------------ //
         private void RunConversion()
         {
@@ -110,7 +123,7 @@ namespace JayT.VRChatAvatarHelper.Editor
                 return;
             }
 
-            // コライダー変換
+            // Collider conversion
             _dbcList = new List<DynamicBoneColliderBase>();
             foreach (var col in _pbcArray)
             {
@@ -120,17 +133,17 @@ namespace JayT.VRChatAvatarHelper.Editor
                     ConvertCollider(col);
             }
 
-            // ボーン変換
+            // Bone conversion
             int warnCount = 0;
             var warnings = new List<string>();
             foreach (var pb in pbArray)
                 ConvertBone(pb, warnings, ref warnCount);
 
-            // 元コンポーネント削除
+            // Remove original components
             foreach (var pbc in _pbcArray) DestroyImmediate(pbc);
             foreach (var pb  in pbArray)   DestroyImmediate(pb);
 
-            // ログ生成
+            // Log
             _log = $"変換完了\n" +
                    $"  VRCPhysBone        : {pbArray.Length} 個\n" +
                    $"  VRCPhysBoneCollider: {_dbcList.Count} 個\n";
@@ -152,13 +165,13 @@ namespace JayT.VRChatAvatarHelper.Editor
         }
 
         // ------------------------------------------------------------------ //
-        //  ボーン変換
+        //  Bone conversion
         // ------------------------------------------------------------------ //
         private void ConvertBone(VRCPhysBone pb, List<string> warnings, ref int warnCount)
         {
             pb.InitTransforms(false);
 
-            // null チェック・クリーンアップ
+            // Null check / cleanup
             if (pb.rootTransform == null) pb.rootTransform = pb.transform;
             pb.ignoreTransforms = pb.ignoreTransforms?.Where(t => t != null).ToList();
             if (pb.ignoreTransforms?.Count == 0) pb.ignoreTransforms = null;
@@ -167,7 +180,7 @@ namespace JayT.VRChatAvatarHelper.Editor
 
             var db = pb.gameObject.AddComponent<DynamicBone>();
 
-            // ---- ロスレス ----
+            // ---- Lossless ----
             db.enabled              = pb.enabled;
             db.m_Root               = pb.rootTransform;
             db.m_Exclusions         = pb.ignoreTransforms;
@@ -181,7 +194,7 @@ namespace JayT.VRChatAvatarHelper.Editor
             db.m_Radius        = pb.radius * scaleFactor;
             db.m_RadiusDistrib = pb.radiusCurve;
 
-            // ---- ImmobileType の警告 ----
+            // ---- ImmobileType warning ----
             if (pb.immobileType == VRCPhysBoneBase.ImmobileType.World)
             {
                 warnings.Add($"  [{pb.gameObject.name}] ImmobileType=World は変換不可 → AllMotion として扱われます");
@@ -195,7 +208,7 @@ namespace JayT.VRChatAvatarHelper.Editor
                 warnCount++;
             }
 
-            // ---- FreezeAxis (Hinge のみ) ----
+            // ---- FreezeAxis (Hinge only) ----
             var fa = DynamicBone.FreezeAxis.None;
             if (pb.limitType == VRCPhysBoneBase.LimitType.Hinge)
             {
@@ -210,10 +223,19 @@ namespace JayT.VRChatAvatarHelper.Editor
             }
             db.m_FreezeAxis = fa;
 
-            // ---- Gravity + GravityFalloff → Gravity + Force ----
-            float boneLen = Mathf.Max(1e-5f, AverageBoneLength(pb));
-            float gVal    = -pb.gravity * boneLen
-                          / Mathf.Max(1e-5f, Mathf.Abs(pb.transform.lossyScale.x));
+            // ---- Gravity + GravityFalloff -> Gravity + Force ----
+            // [FIX] v1.1: Gravity is a ratio (0-1), use fixed small coefficient instead of boneLength
+            float gVal;
+            if (pb.version == VRCPhysBoneBase.Version.Version_1_1)
+            {
+                gVal = -pb.gravity * GravityV11Scale;
+            }
+            else
+            {
+                float boneLen = Mathf.Max(1e-5f, AverageBoneLength(pb));
+                gVal = -pb.gravity * boneLen
+                     / Mathf.Max(1e-5f, Mathf.Abs(pb.transform.lossyScale.x));
+            }
 
             if      (pb.gravityFalloff >= 1f - 1e-5f) { db.m_Gravity = new Vector3(0, gVal, 0); }
             else if (pb.gravityFalloff <= 1e-5f)      { db.m_Force   = new Vector3(0, gVal, 0); }
@@ -225,20 +247,28 @@ namespace JayT.VRChatAvatarHelper.Editor
                 db.m_Force   = new Vector3(0, gVal * c, 0);
             }
 
-            // ---- Spring / Momentum → Damping ----
-            // v1.0: pb.spring  / v1.1: pb.spring (Momentumとして機能)
-            // どちらも同一フィールド名 spring を使用するため分岐不要
+            // ---- Spring / Momentum -> Damping ----
             ConvertSpringToDamping(pb, db);
 
-            // ---- MaxAngleX → Stiffness ----
-            ConvertAngleToStiffness(pb, db);
+            // ---- Limit -> Stiffness (with Polar support) ----
+            ConvertLimitToStiffness(pb, db, warnings, ref warnCount);
 
-            // ---- v1.1 専用フィールドの処理 ----
+            // ---- [FIX] Spring -> partial redistribution to Stiffness/Elasticity ----
+            // PB's Spring has implicit shape retention effect that DB lacks.
+            // Compensate by adding a portion to Stiffness and Elasticity.
+            db.m_Stiffness  = Mathf.Clamp01(db.m_Stiffness  + pb.spring * SpringToStiffnessFactor);
+            db.m_Elasticity = Mathf.Clamp01(db.m_Elasticity  + pb.spring * SpringToElasticityFactor);
+
+            // ---- [FIX] Immobile/Pull -> Stiffness base value ----
+            // PB retains shape through the combination of Immobile + Pull.
+            // DB relies primarily on Stiffness for this, so we add a base value.
+            float baseStiffness = pb.immobile * ImmobileToStiffnessFactor
+                                + (1f - pb.pull) * PullDeficitToStiffnessFactor;
+            db.m_Stiffness = Mathf.Clamp01(db.m_Stiffness + baseStiffness);
+
+            // ---- v1.1 specific fields ----
             if (pb.version == VRCPhysBoneBase.Version.Version_1_1)
             {
-                // Stiffness(v1.1) → DB Stiffness に加算（近似）
-                // PB v1.1 Stiffness は「直前フレームの向きを保持する力」
-                // DB Stiffness は「静止位置への復元力」で概念が異なるが最も近い項目
                 if (pb.stiffness > 0f)
                 {
                     db.m_Stiffness = Mathf.Clamp01(db.m_Stiffness + pb.stiffness);
@@ -253,7 +283,7 @@ namespace JayT.VRChatAvatarHelper.Editor
                 }
             }
 
-            // ---- コライダー参照の引き継ぎ ----
+            // ---- Collider reference migration ----
             if (pb.colliders != null && pb.colliders.Count > 0)
             {
                 var cols = new List<DynamicBoneColliderBase>();
@@ -268,7 +298,7 @@ namespace JayT.VRChatAvatarHelper.Editor
         }
 
         // ------------------------------------------------------------------ //
-        //  Spring → Damping 変換
+        //  Spring -> Damping conversion
         // ------------------------------------------------------------------ //
         private void ConvertSpringToDamping(VRCPhysBone pb, DynamicBone db)
         {
@@ -299,22 +329,57 @@ namespace JayT.VRChatAvatarHelper.Editor
         }
 
         // ------------------------------------------------------------------ //
-        //  MaxAngleX → Stiffness 変換
+        //  [FIX] Limit -> Stiffness conversion (Polar / Angle / Hinge / None)
+        //  Replaces old ConvertAngleToStiffness:
+        //  - Polar: weighted average of MaxPitch(maxAngleX) and MaxYaw(maxAngleZ)
+        //  - Angle/Hinge: maxAngleX only (as before)
+        //  - None: limit-derived Stiffness = 0 (base value added later)
         // ------------------------------------------------------------------ //
-        private void ConvertAngleToStiffness(VRCPhysBone pb, DynamicBone db)
+        private void ConvertLimitToStiffness(VRCPhysBone pb, DynamicBone db,
+                                              List<string> warnings, ref int warnCount)
         {
+            // No limit -> no limit-derived stiffness
+            // (base value from Immobile/Pull/Spring is added in ConvertBone)
+            if (pb.limitType == VRCPhysBoneBase.LimitType.None)
+            {
+                db.m_Stiffness        = 0f;
+                db.m_StiffnessDistrib = null;
+                return;
+            }
+
+            // ---- Compute effective angle ----
+            float effectiveAngle;
+            if (pb.limitType == VRCPhysBoneBase.LimitType.Polar)
+            {
+                // Polar: weighted average biased toward the tighter axis (smaller angle)
+                // to better represent the overall constraint strength
+                float minAngle = Mathf.Min(pb.maxAngleX, pb.maxAngleZ);
+                float maxAngle = Mathf.Max(pb.maxAngleX, pb.maxAngleZ);
+                effectiveAngle = minAngle * 0.7f + maxAngle * 0.3f;
+
+                warnings.Add($"  [{pb.gameObject.name}] Polar(Pitch={pb.maxAngleX}, Yaw={pb.maxAngleZ}) → effectiveAngle={effectiveAngle:F1} で Stiffness 近似");
+                warnCount++;
+            }
+            else
+            {
+                // Angle / Hinge: use maxAngleX directly
+                effectiveAngle = pb.maxAngleX;
+            }
+
+            // ---- Without curve ----
             var curve = pb.maxAngleXCurve;
             bool isFlatOne = curve == null || curve.length == 0
                           || IsConstantCurve(curve, out float cval) && Mathf.Approximately(cval, 1f);
 
             if (isFlatOne)
             {
-                db.m_Stiffness        = _maxAngleToStiff.Evaluate(pb.maxAngleX);
+                db.m_Stiffness        = _maxAngleToStiff.Evaluate(effectiveAngle);
                 db.m_StiffnessDistrib = null;
                 return;
             }
 
-            var trueCurve = BuildStiffnessCurve(curve);
+            // ---- With curve ----
+            var trueCurve = BuildStiffnessCurve(curve, effectiveAngle);
             float maxStiff = Mathf.Clamp01(CurveAbsMax(trueCurve, 0f, 1f));
             db.m_Stiffness = maxStiff;
 
@@ -330,14 +395,14 @@ namespace JayT.VRChatAvatarHelper.Editor
             db.m_StiffnessDistrib = distrib;
         }
 
-        // MaxAngle カーブ → Stiffness カーブへの近似変換
-        private AnimationCurve BuildStiffnessCurve(AnimationCurve angleCurve)
+        // [FIX] Takes effectiveAngle instead of hardcoded 180
+        private AnimationCurve BuildStiffnessCurve(AnimationCurve angleCurve, float baseAngle)
         {
             var kfs = new Keyframe[angleCurve.length];
             for (int i = 0; i < kfs.Length; i++)
             {
                 float t = (float)i / Mathf.Max(1, kfs.Length - 1);
-                float v = _maxAngleToStiff.Evaluate(180f * angleCurve.keys[i].value);
+                float v = _maxAngleToStiff.Evaluate(baseAngle * angleCurve.keys[i].value);
                 kfs[i] = new Keyframe(t, v);
             }
             var result = new AnimationCurve(kfs);
@@ -345,39 +410,45 @@ namespace JayT.VRChatAvatarHelper.Editor
             return result;
         }
 
-        // ------------------------------------------------------------------ //
-        //  コライダー変換（Sphere / Capsule）
-        // ------------------------------------------------------------------ //
+        // ================================================================== //
+        //  Collider conversion (Sphere / Capsule)
+        // ================================================================== //
         private void ConvertCollider(VRCPhysBoneCollider src)
         {
-            var go     = src.gameObject;
-            var bound  = src.insideBounds
-                       ? DynamicBoneColliderBase.Bound.Inside
-                       : DynamicBoneColliderBase.Bound.Outside;
+            Transform baseTransform = src.rootTransform != null ? src.rootTransform : src.transform;
+
+            var bound = src.insideBounds
+                      ? DynamicBoneColliderBase.Bound.Inside
+                      : DynamicBoneColliderBase.Bound.Outside;
+
             float r = src.radius;
             float h = src.shapeType == VRCPhysBoneColliderBase.ShapeType.Capsule ? src.height : 0f;
 
-            ResolveColliderOrientation(src, out GameObject targetGO, out Vector3 pos,
-                                       out DynamicBoneColliderBase.Direction dir, "DynBone_Collider");
+            ResolveColliderOrientation(src, baseTransform,
+                out GameObject targetGO, out Vector3 pos,
+                out DynamicBoneColliderBase.Direction dir);
 
             var dc = targetGO.AddComponent<DynamicBoneCollider>();
-            dc.enabled      = src.enabled;
-            dc.m_Center     = pos;
-            dc.m_Direction  = dir;
-            dc.m_Bound      = bound;
-            dc.m_Radius     = r;
-            dc.m_Height     = h;
+            dc.enabled     = src.enabled;
+            dc.m_Center    = pos;
+            dc.m_Direction = dir;
+            dc.m_Bound     = bound;
+            dc.m_Radius    = r;
+            dc.m_Height    = h;
             _dbcList.Add(dc);
         }
 
-        // ------------------------------------------------------------------ //
-        //  コライダー変換（Plane）
-        // ------------------------------------------------------------------ //
+        // ================================================================== //
+        //  Collider conversion (Plane)
+        // ================================================================== //
         private void ConvertPlaneCollider(VRCPhysBoneCollider src)
         {
-            ResolveColliderOrientation(src, out GameObject targetGO, out Vector3 pos,
-                                       out DynamicBoneColliderBase.Direction dir, "DynBone_PlaneCollider",
-                                       out DynamicBoneColliderBase.Bound bound);
+            Transform baseTransform = src.rootTransform != null ? src.rootTransform : src.transform;
+
+            ResolveColliderOrientationPlane(src, baseTransform,
+                out GameObject targetGO, out Vector3 pos,
+                out DynamicBoneColliderBase.Direction dir,
+                out DynamicBoneColliderBase.Bound bound);
 
             var dc = targetGO.AddComponent<DynamicBonePlaneCollider>();
             dc.enabled     = src.enabled;
@@ -387,77 +458,182 @@ namespace JayT.VRChatAvatarHelper.Editor
             _dbcList.Add(dc);
         }
 
-        // ------------------------------------------------------------------ //
-        //  コライダー回転→向き解決（Sphere/Capsule用）
-        // ------------------------------------------------------------------ //
+        // ================================================================== //
+        //  Collider orientation resolver (Sphere / Capsule)
+        // ================================================================== //
         private void ResolveColliderOrientation(
             VRCPhysBoneCollider src,
+            Transform baseTransform,
             out GameObject go,
             out Vector3 pos,
-            out DynamicBoneColliderBase.Direction dir,
-            string goName)
+            out DynamicBoneColliderBase.Direction dir)
         {
-            go  = src.gameObject;
+            go  = baseTransform.gameObject;
             pos = src.position;
             dir = DynamicBoneColliderBase.Direction.Y;
 
             var rot = src.rotation;
-            if      (rot == Quaternion.AngleAxis(-90f, Vector3.forward) ||
-                     rot == Quaternion.AngleAxis( 90f, Vector3.forward))
-                dir = DynamicBoneColliderBase.Direction.X;
-            else if (rot == Quaternion.identity ||
-                     rot == Quaternion.AngleAxis(180f, Vector3.forward))
-                dir = DynamicBoneColliderBase.Direction.Y;
-            else if (rot == Quaternion.AngleAxis( 90f, Vector3.right) ||
-                     rot == Quaternion.AngleAxis(-90f, Vector3.right))
-                dir = DynamicBoneColliderBase.Direction.Z;
-            else
+
+            if (QuatApprox(rot, Quaternion.identity))
             {
-                // 斜め回転 → 親 GO を追加して回転を吸収
-                go  = CreateChildGO(src.transform, Vector3.zero, rot, goName);
-                pos = Quaternion.Inverse(rot) * src.position;
+                dir = DynamicBoneColliderBase.Direction.Y;
+                return;
             }
+
+            if (QuatApprox(rot, Quaternion.AngleAxis(-90f, Vector3.forward)) ||
+                QuatApprox(rot, Quaternion.AngleAxis( 90f, Vector3.forward)))
+            {
+                dir = DynamicBoneColliderBase.Direction.X;
+                return;
+            }
+
+            if (QuatApprox(rot, Quaternion.AngleAxis(180f, Vector3.forward)) ||
+                QuatApprox(rot, Quaternion.AngleAxis(180f, Vector3.up)))
+            {
+                dir = DynamicBoneColliderBase.Direction.Y;
+                return;
+            }
+
+            if (QuatApprox(rot, Quaternion.AngleAxis( 90f, Vector3.right)) ||
+                QuatApprox(rot, Quaternion.AngleAxis(-90f, Vector3.right)))
+            {
+                dir = DynamicBoneColliderBase.Direction.Z;
+                return;
+            }
+
+            Vector3 rotatedY = rot * Vector3.up;
+            float absX = Mathf.Abs(rotatedY.x);
+            float absY = Mathf.Abs(rotatedY.y);
+            float absZ = Mathf.Abs(rotatedY.z);
+
+            const float axisThreshold = 0.95f;
+
+            if (absX >= absY && absX >= absZ && absX >= axisThreshold)
+            {
+                dir = DynamicBoneColliderBase.Direction.X;
+                return;
+            }
+            if (absY >= absX && absY >= absZ && absY >= axisThreshold)
+            {
+                dir = DynamicBoneColliderBase.Direction.Y;
+                return;
+            }
+            if (absZ >= absX && absZ >= absY && absZ >= axisThreshold)
+            {
+                dir = DynamicBoneColliderBase.Direction.Z;
+                return;
+            }
+
+            go  = CreateChildGO(baseTransform, Vector3.zero, rot, "DynBone_Collider");
+            pos = Quaternion.Inverse(rot) * src.position;
+            dir = DynamicBoneColliderBase.Direction.Y;
         }
 
-        // ------------------------------------------------------------------ //
-        //  コライダー回転→向き解決（Plane用、Bound 付き）
-        // ------------------------------------------------------------------ //
-        private void ResolveColliderOrientation(
+        // ================================================================== //
+        //  Collider orientation resolver (Plane)
+        // ================================================================== //
+        private void ResolveColliderOrientationPlane(
             VRCPhysBoneCollider src,
+            Transform baseTransform,
             out GameObject go,
             out Vector3 pos,
             out DynamicBoneColliderBase.Direction dir,
-            string goName,
             out DynamicBoneColliderBase.Bound bound)
         {
-            go    = src.gameObject;
+            go    = baseTransform.gameObject;
             pos   = src.position;
             dir   = DynamicBoneColliderBase.Direction.Y;
             bound = DynamicBoneColliderBase.Bound.Outside;
 
             var rot = src.rotation;
-            if      (rot == Quaternion.AngleAxis(-90f, Vector3.forward))
-                { dir = DynamicBoneColliderBase.Direction.X; }
-            else if (rot == Quaternion.AngleAxis( 90f, Vector3.forward))
-                { dir = DynamicBoneColliderBase.Direction.X; bound = DynamicBoneColliderBase.Bound.Inside; }
-            else if (rot == Quaternion.identity)
-                { dir = DynamicBoneColliderBase.Direction.Y; }
-            else if (rot == Quaternion.AngleAxis(180f, Vector3.forward))
-                { dir = DynamicBoneColliderBase.Direction.Y; bound = DynamicBoneColliderBase.Bound.Inside; }
-            else if (rot == Quaternion.AngleAxis( 90f, Vector3.right))
-                { dir = DynamicBoneColliderBase.Direction.Z; }
-            else if (rot == Quaternion.AngleAxis(-90f, Vector3.right))
-                { dir = DynamicBoneColliderBase.Direction.Z; bound = DynamicBoneColliderBase.Bound.Inside; }
-            else
+
+            if (QuatApprox(rot, Quaternion.identity))
             {
-                go  = CreateChildGO(src.transform, Vector3.zero, rot, goName);
-                pos = Quaternion.Inverse(rot) * src.position;
+                dir = DynamicBoneColliderBase.Direction.Y;
+                bound = DynamicBoneColliderBase.Bound.Outside;
+                return;
             }
+
+            if (QuatApprox(rot, Quaternion.AngleAxis(-90f, Vector3.forward)))
+            {
+                dir = DynamicBoneColliderBase.Direction.X;
+                bound = DynamicBoneColliderBase.Bound.Outside;
+                return;
+            }
+            if (QuatApprox(rot, Quaternion.AngleAxis(90f, Vector3.forward)))
+            {
+                dir = DynamicBoneColliderBase.Direction.X;
+                bound = DynamicBoneColliderBase.Bound.Inside;
+                return;
+            }
+
+            if (QuatApprox(rot, Quaternion.AngleAxis(180f, Vector3.forward)) ||
+                QuatApprox(rot, Quaternion.AngleAxis(180f, Vector3.right)))
+            {
+                dir = DynamicBoneColliderBase.Direction.Y;
+                bound = DynamicBoneColliderBase.Bound.Inside;
+                return;
+            }
+
+            if (QuatApprox(rot, Quaternion.AngleAxis(90f, Vector3.right)))
+            {
+                dir = DynamicBoneColliderBase.Direction.Z;
+                bound = DynamicBoneColliderBase.Bound.Outside;
+                return;
+            }
+            if (QuatApprox(rot, Quaternion.AngleAxis(-90f, Vector3.right)))
+            {
+                dir = DynamicBoneColliderBase.Direction.Z;
+                bound = DynamicBoneColliderBase.Bound.Inside;
+                return;
+            }
+
+            Vector3 normal = rot * Vector3.up;
+            float absX = Mathf.Abs(normal.x);
+            float absY = Mathf.Abs(normal.y);
+            float absZ = Mathf.Abs(normal.z);
+
+            const float axisThreshold = 0.95f;
+
+            if (absX >= absY && absX >= absZ && absX >= axisThreshold)
+            {
+                dir   = DynamicBoneColliderBase.Direction.X;
+                bound = normal.x > 0
+                    ? DynamicBoneColliderBase.Bound.Outside
+                    : DynamicBoneColliderBase.Bound.Inside;
+                return;
+            }
+            if (absY >= absX && absY >= absZ && absY >= axisThreshold)
+            {
+                dir   = DynamicBoneColliderBase.Direction.Y;
+                bound = normal.y > 0
+                    ? DynamicBoneColliderBase.Bound.Outside
+                    : DynamicBoneColliderBase.Bound.Inside;
+                return;
+            }
+            if (absZ >= absX && absZ >= absY && absZ >= axisThreshold)
+            {
+                dir   = DynamicBoneColliderBase.Direction.Z;
+                bound = normal.z > 0
+                    ? DynamicBoneColliderBase.Bound.Outside
+                    : DynamicBoneColliderBase.Bound.Inside;
+                return;
+            }
+
+            go    = CreateChildGO(baseTransform, Vector3.zero, rot, "DynBone_PlaneCollider");
+            pos   = Quaternion.Inverse(rot) * src.position;
+            dir   = DynamicBoneColliderBase.Direction.Y;
+            bound = DynamicBoneColliderBase.Bound.Outside;
         }
 
         // ------------------------------------------------------------------ //
-        //  ユーティリティ
+        //  Utilities
         // ------------------------------------------------------------------ //
+
+        private static bool QuatApprox(Quaternion a, Quaternion b)
+        {
+            return Quaternion.Angle(a, b) < QuaternionTolerance;
+        }
 
         private static float AverageBoneLength(VRCPhysBone pb)
         {
@@ -524,8 +700,7 @@ namespace JayT.VRChatAvatarHelper.Editor
         }
 
         // ------------------------------------------------------------------ //
-        //  Stiffness ↔ MaxAngle 変換テーブル初期化
-        //  （VRChat SDK 公式の PhysBoneMigration.StiffToMaxAngle と同値）
+        //  Stiffness <-> MaxAngle conversion table init
         // ------------------------------------------------------------------ //
         private static void InitConversionTable()
         {
@@ -548,7 +723,6 @@ namespace JayT.VRChatAvatarHelper.Editor
             for (int i = 0; i < stiffToAngle.length; i++)
                 stiffToAngle.SmoothTangents(i, 0f);
 
-            // 逆引きテーブル: MaxAngle → Stiffness（1801点サンプリング）
             var kfs = new Keyframe[1801];
             for (int i = 0; i < kfs.Length; i++)
             {
