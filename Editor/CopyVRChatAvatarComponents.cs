@@ -17,6 +17,7 @@ namespace JayT.VRChatAvatarHelper.Editor
         [SerializeField] private List<SkinnedMeshRenderer> targetSkinnedMeshes = new List<SkinnedMeshRenderer>();
         [SerializeField] private int skinnedMeshCount = 0;
         [SerializeField] private bool copyBoneTransforms = true;
+        [SerializeField] private bool copyMAScaleAdjuster = false;
         [SerializeField] private bool copyAvatarDescriptor = false;
         [SerializeField] private bool copyPhysBones = false;
         [SerializeField] private bool copyPhysBoneColliders = false;
@@ -50,6 +51,19 @@ namespace JayT.VRChatAvatarHelper.Editor
 
             EditorGUILayout.LabelField("Copy Options", EditorStyles.boldLabel);
             copyBoneTransforms = EditorGUILayout.Toggle("Copy Bone Transforms", copyBoneTransforms);
+            
+            using (new EditorGUI.DisabledScope(!copyBoneTransforms))
+            {
+                copyMAScaleAdjuster = EditorGUILayout.Toggle("  Copy MA Scale Adjuster", copyMAScaleAdjuster);
+                if (!copyBoneTransforms) copyMAScaleAdjuster = true;
+            }
+            if (!copyMAScaleAdjuster)
+            {
+                EditorGUILayout.HelpBox(
+                    "OFF: MA Scale Adjuster の値を localScale に乗算して焼き込みます。服側に MA Scale Adjuster はコピーされません。",
+                    MessageType.Info);
+            }
+
             copyAvatarDescriptor = EditorGUILayout.Toggle("Copy Avatar Descriptor", copyAvatarDescriptor);
             copyPhysBoneColliders = EditorGUILayout.Toggle("Copy PhysBone Colliders", copyPhysBoneColliders);
             copyPhysBones = EditorGUILayout.Toggle("Copy PhysBones", copyPhysBones);
@@ -133,7 +147,7 @@ namespace JayT.VRChatAvatarHelper.Editor
             {
                 if (sourceArmature != null && targetArmature != null)
                 {
-                    CopyTransformAndScaleAdjuster(sourceArmature, targetArmature);
+                    CopyTransform(sourceArmature, targetArmature);
                 }
                 CopyHumanoidBoneTransforms();
             }
@@ -225,7 +239,7 @@ namespace JayT.VRChatAvatarHelper.Editor
                 
                 if (sourceBone != null && boneMappingHumanoidOnly.TryGetValue(sourceBone, out Transform targetBone))
                 {
-                    CopyTransformAndScaleAdjuster(sourceBone, targetBone);
+                    CopyTransform(sourceBone, targetBone);
                 }
             }
         }
@@ -249,21 +263,24 @@ namespace JayT.VRChatAvatarHelper.Editor
             return null;
         }
 
-        private void CopyTransformAndScaleAdjuster(Transform source, Transform target)
+        private void CopyTransform(Transform source, Transform target)
         {
             target.localPosition = source.localPosition;
             target.localRotation = source.localRotation;
             target.localScale = source.localScale;
 
-            var sourceScaleAdjuster = source.GetComponent<ModularAvatarScaleAdjuster>();
-            if (sourceScaleAdjuster != null)
+            if (copyMAScaleAdjuster)
             {
-                var targetScaleAdjuster = target.GetComponent<ModularAvatarScaleAdjuster>();
-                if (targetScaleAdjuster == null)
+                var sourceScaleAdjuster = source.GetComponent<ModularAvatarScaleAdjuster>();
+                if (sourceScaleAdjuster != null)
                 {
-                    targetScaleAdjuster = target.gameObject.AddComponent<ModularAvatarScaleAdjuster>();
+                    var targetScaleAdjuster = target.GetComponent<ModularAvatarScaleAdjuster>();
+                    if (targetScaleAdjuster == null)
+                    {
+                        targetScaleAdjuster = target.gameObject.AddComponent<ModularAvatarScaleAdjuster>();
+                    }
+                    targetScaleAdjuster.Scale = sourceScaleAdjuster.Scale;
                 }
-                targetScaleAdjuster.Scale = sourceScaleAdjuster.Scale;
             }
         }
 
