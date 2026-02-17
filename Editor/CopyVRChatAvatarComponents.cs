@@ -54,14 +54,8 @@ namespace JayT.VRChatAvatarHelper.Editor
             
             using (new EditorGUI.DisabledScope(!copyBoneTransforms))
             {
-                copyMAScaleAdjuster = EditorGUILayout.Toggle("  Copy MA Scale Adjuster", copyMAScaleAdjuster);
-                if (!copyBoneTransforms) copyMAScaleAdjuster = true;
-            }
-            if (!copyMAScaleAdjuster)
-            {
-                EditorGUILayout.HelpBox(
-                    "OFF: MA Scale Adjuster の値を localScale に乗算して焼き込みます。服側に MA Scale Adjuster はコピーされません。",
-                    MessageType.Info);
+                copyMAScaleAdjuster = EditorGUILayout.Toggle("Copy MA Scale Adjuster", copyMAScaleAdjuster);
+                if (!copyBoneTransforms) copyMAScaleAdjuster = false;
             }
 
             copyAvatarDescriptor = EditorGUILayout.Toggle("Copy Avatar Descriptor", copyAvatarDescriptor);
