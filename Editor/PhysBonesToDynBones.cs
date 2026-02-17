@@ -11,12 +11,12 @@
 //   All colliders (Sphere / Capsule / Plane)
 //
 // Lossy:
-//   Spring(v1.0) / Momentum(v1.1)   -> Damping (+Curve)       * 1:1 not possible
-//   MaxAngleX / Polar(Pitch,Yaw)    -> Stiffness (+Curve)      * angle-to-ratio approximation
-//   Stiffness(v1.1)                 -> Stiffness add (approx)  * different concepts
-//   Spring -> Stiffness/Elasticity partial redistribution       * shape retention补完
-//   Gravity + GravityFalloff        -> Gravity + Force          * v1.1 ratio support
-//   Hinge LimitType + FreezeAxis    -> FreezeAxis               * diagonal axis -> None
+//   Spring(v1.0) / Momentum(v1.1)   -> Damping (+Curve)       
+//   MaxAngleX / Polar(Pitch,Yaw)    -> Stiffness (+Curve)     
+//   Stiffness(v1.1)                 -> Stiffness add (approx) 
+//   Spring -> Stiffness/Elasticity partial redistribution     
+//   Gravity + GravityFalloff        -> Gravity + Force        
+//   Hinge LimitType + FreezeAxis    -> FreezeAxis             
 //
 // Not converted (no DB equivalent):
 //   Squish, Stretch, MaxStretch, MaxSquish
