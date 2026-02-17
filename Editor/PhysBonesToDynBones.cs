@@ -62,7 +62,14 @@ namespace JayT.VRChatAvatarHelper.Editor
         private const float SpringToElasticityFactor    = 0.15f;
         private const float ImmobileToStiffnessFactor   = 0.30f;
         private const float PullDeficitToStiffnessFactor = 0.20f;
-        private const float GravityV11Scale             = 0.05f;
+        private const float GravityV11Scale             = 0.02f;
+
+        // Short bone chain: if total bone length < this threshold,
+        // enforce a minimum Stiffness to prevent visible separation.
+        // DB's maxlen = restLen * (1 - stiffness) * 2, so for short chains
+        // even a small maxlen causes visible gaps.
+        private const float ShortBoneThreshold          = 0.05f;  // meters
+        private const float ShortBoneStiffnessMin       = 0.85f;
 
         // ------------------------------------------------------------------ //
         //  Menu
@@ -161,7 +168,7 @@ namespace JayT.VRChatAvatarHelper.Editor
                     "  Grab/Pose/Collision 権限,\n" +
                     "  ImmobileType=World,\n" +
                     "  ignoreOtherPhysBones,\n" +
-                    "  Multi-Child Type";
+                    "  Multi-Child Type (Ignore以外)";
         }
 
         // ------------------------------------------------------------------ //
@@ -178,11 +185,57 @@ namespace JayT.VRChatAvatarHelper.Editor
             pb.colliders = pb.colliders?.Where(c => c != null).ToList();
             if (pb.colliders?.Count == 0) pb.colliders = null;
 
+            // ---- [FIX v5] Multi-Child Type = Ignore → split into per-child DBs ----
+            // PB with Multi-Child=Ignore treats each direct child chain independently
+            // and does NOT move the root bone. DB has no equivalent; it processes all
+            // children together, and if ChildCount > 1, parent rotation is skipped,
+            // causing bone separation. Solution: create one DB per child chain.
+            if (pb.multiChildType == VRCPhysBoneBase.MultiChildType.Ignore
+                && pb.rootTransform.childCount > 1)
+            {
+                var childRoots = new List<Transform>();
+                for (int i = 0; i < pb.rootTransform.childCount; i++)
+                {
+                    Transform child = pb.rootTransform.GetChild(i);
+                    // Skip if this child is in ignoreTransforms
+                    if (pb.ignoreTransforms != null && pb.ignoreTransforms.Contains(child))
+                        continue;
+                    childRoots.Add(child);
+                }
+
+                if (childRoots.Count > 1)
+                {
+                    warnings.Add($"  [{pb.gameObject.name}] Multi-Child=Ignore + 子{childRoots.Count}本 " +
+                                 $"→ DB を子ごとに分割（DB の枝分かれバグ回避）");
+                    warnCount++;
+
+                    foreach (var childRoot in childRoots)
+                    {
+                        ConvertBoneWithRoot(pb, childRoot, warnings, ref warnCount);
+                    }
+                    return;
+                }
+            }
+
+            // Normal path: 1 PB → 1 DB
+            ConvertBoneWithRoot(pb, null, warnings, ref warnCount);
+        }
+
+        /// <summary>
+        /// Core conversion: creates a DB component from a PB.
+        /// If overrideRoot is non-null, the DB's Root is set to that transform
+        /// instead of the PB's rootTransform (used for Multi-Child splitting).
+        /// </summary>
+        private void ConvertBoneWithRoot(VRCPhysBone pb, Transform overrideRoot,
+                                         List<string> warnings, ref int warnCount)
+        {
+            Transform dbRoot = overrideRoot != null ? overrideRoot : pb.rootTransform;
+
             var db = pb.gameObject.AddComponent<DynamicBone>();
 
             // ---- Lossless ----
             db.enabled              = pb.enabled;
-            db.m_Root               = pb.rootTransform;
+            db.m_Root               = dbRoot;
             db.m_Exclusions         = pb.ignoreTransforms;
             db.m_Elasticity         = pb.pull;
             db.m_ElasticityDistrib  = pb.pullCurve;
@@ -224,27 +277,37 @@ namespace JayT.VRChatAvatarHelper.Editor
             db.m_FreezeAxis = fa;
 
             // ---- Gravity + GravityFalloff -> Gravity + Force ----
-            // [FIX] v1.1: Gravity is a ratio (0-1), use fixed small coefficient instead of boneLength
-            float gVal;
             if (pb.version == VRCPhysBoneBase.Version.Version_1_1)
             {
-                gVal = -pb.gravity * GravityV11Scale;
-            }
-            else
-            {
-                float boneLen = Mathf.Max(1e-5f, AverageBoneLength(pb));
-                gVal = -pb.gravity * boneLen
-                     / Mathf.Max(1e-5f, Mathf.Abs(pb.transform.lossyScale.x));
-            }
+                // [FIX v5] v1.1: Gravity is a "pose ratio" (not a force).
+                // DB's m_Gravity = "force that is cancelled at rest pose" — this is
+                // conceptually the closest match to PB v1.1's gravity behavior.
+                // DB's m_Force = "always-on force" — must NOT be used for v1.1.
+                //
+                // GravityFalloff reduces gravity at rest in PB, so we pre-apply it.
+                // Community typical values: m_Gravity.y = -0.005 ~ -0.01
+                float effectiveGravity = pb.gravity * (1f - pb.gravityFalloff);
+                float gVal = -effectiveGravity * GravityV11Scale;
 
-            if      (pb.gravityFalloff >= 1f - 1e-5f) { db.m_Gravity = new Vector3(0, gVal, 0); }
-            else if (pb.gravityFalloff <= 1e-5f)      { db.m_Force   = new Vector3(0, gVal, 0); }
+                db.m_Gravity = new Vector3(0, gVal, 0);
+                db.m_Force   = Vector3.zero;
+            }
             else
             {
-                float s = Mathf.Round(1e8f * Mathf.Sin(2f * Mathf.PI * pb.gravityFalloff)) / 1e8f;
-                float c = Mathf.Round(1e8f * Mathf.Cos(2f * Mathf.PI * pb.gravityFalloff)) / 1e8f;
-                db.m_Gravity = new Vector3(0, gVal * s, 0);
-                db.m_Force   = new Vector3(0, gVal * c, 0);
+                // v1.0: Gravity is a direct force, use boneLength-based conversion
+                float boneLen = Mathf.Max(1e-5f, AverageBoneLength(pb));
+                float gVal    = -pb.gravity * boneLen
+                              / Mathf.Max(1e-5f, Mathf.Abs(pb.transform.lossyScale.x));
+
+                if      (pb.gravityFalloff >= 1f - 1e-5f) { db.m_Gravity = new Vector3(0, gVal, 0); }
+                else if (pb.gravityFalloff <= 1e-5f)      { db.m_Force   = new Vector3(0, gVal, 0); }
+                else
+                {
+                    float s = Mathf.Round(1e8f * Mathf.Sin(2f * Mathf.PI * pb.gravityFalloff)) / 1e8f;
+                    float c = Mathf.Round(1e8f * Mathf.Cos(2f * Mathf.PI * pb.gravityFalloff)) / 1e8f;
+                    db.m_Gravity = new Vector3(0, gVal * s, 0);
+                    db.m_Force   = new Vector3(0, gVal * c, 0);
+                }
             }
 
             // ---- Spring / Momentum -> Damping ----
@@ -281,6 +344,20 @@ namespace JayT.VRChatAvatarHelper.Editor
                     warnings.Add($"  [{pb.gameObject.name}] Squish/Stretch は変換不可");
                     warnCount++;
                 }
+            }
+
+            // ---- [FIX v5] Short bone chain Stiffness minimum ----
+            // DB's maxlen = restLen * (1 - stiffness) * 2.
+            // For short chains (earrings, small accessories), even a small maxlen
+            // causes visible bone separation. Enforce a minimum Stiffness.
+            float avgBoneLen = AverageBoneLength(pb);
+            if (avgBoneLen > 0f && avgBoneLen < ShortBoneThreshold
+                && db.m_Stiffness < ShortBoneStiffnessMin)
+            {
+                warnings.Add($"  [{pb.gameObject.name}] 短いボーン(avgLen={avgBoneLen:F4}) → " +
+                             $"Stiffness を {db.m_Stiffness:F2} → {ShortBoneStiffnessMin:F2} に引き上げ");
+                warnCount++;
+                db.m_Stiffness = ShortBoneStiffnessMin;
             }
 
             // ---- Collider reference migration ----
