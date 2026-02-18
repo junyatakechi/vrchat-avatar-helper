@@ -1,7 +1,4 @@
-// WIP: まだ、完成度低い
 // PhysBones to Dynamic Bones Converter
-// Based on FACS01-01/PhysBone-to-DynamicBone (v2)
-// Updated for VRChat SDK 3.8+ (VRCPhysBone v1.0 / v1.1, ignoreOtherPhysBones)
 //
 // Lossless:
 //   Pull -> Elasticity (+Curve)
@@ -58,36 +55,28 @@ namespace JayT.VRChatAvatarHelper.Editor
         // ------------------------------------------------------------------ //
         //  Tuning constants
         // ------------------------------------------------------------------ //
-        private const float SpringToStiffnessFactor      = 0.20f;
-        private const float SpringToElasticityFactor     = 0.15f;
-        private const float ImmobileToStiffnessFactor    = 0.30f;
 
-        // [CHANGED ①] Pull低め(柔らかい意図)をStiffness加算で固めないよう大幅に削減
-        // 旧: 0.20f → 新: 0.05f
-        private const float PullDeficitToStiffnessFactor = 0.05f;
+        // Stiffness 関連（形状変化, +方向: 硬さ）
+        private const float SpringToStiffnessFactor      = 0.15f; // Springの値をStiffnessに一部加算する割合。形状保持の補完用。
+        private const float ImmobileToStiffnessFactor    = 0.35f; // ImmobileをStiffnessに変換する割合。Immobileが高いほどボーンが硬くなる。
+        private const float PullDeficitToStiffnessFactor = 0.05f; // Pull不足分（1 - Pull）をStiffnessに加算する割合。Pull高め時のみ適用。
+        private const float StiffnessPullSuppressThreshold = 0.5f; // Pullがこの値未満のとき PullDeficit 加算を0にする。柔らかい意図のボーンを固くしないための抑制しきい値。
+        private const float ShortBoneThreshold           = 0.05f; // 平均ボーン長がこれ未満を「短いボーン」と判定する距離（メートル単位）。
+        private const float ShortBoneStiffnessMin        = 0.3f;  // 短いボーンと判定された場合に保証するStiffnessの最低値。
 
-        private const float GravityV11Scale              = 0.25f;
+        // Damping 関連（ブレーキ, +方向: ゆっくり止まる）
+        private const float DampingScale                 = 0.45f; // SpringからDampingへの変換倍率。全体的なDampingの強さを決める上限スケール。
+        private const float DampingMinimum               = 0.35f; // Springが高い（髪など）場合にDampingが0に近くなるのを防ぐ下限値。Spring=1.0でもこの値以上を保証する。
 
-        // [CHANGED ①] Pull低め+Spring高めはDampingが詰まりやすいため緩和
-        // 旧: 0.61f → 新: 0.45f
-        private const float DampingScale                 = 0.45f;
+        // Elasticity 関連（復元力, +方向: 元に戻ろうとする）
+        private const float ElasticityPullThreshold      = 0.4f;  // Pull補正後のElasticityの最低保証値。Pull=0でもこれ以上のElasticityを持たせる。
+        private const float ElasticityMinimum            = 0.3f;  // PullをElasticityに変換する際の全体スケール。Pull値にこれを掛ける。小さいほど「元位置への戻りが遅く・弱い」。
+        private const float ElasticityScale              = 0.40f; // Pull -> Elasticity の変換スケール
+        private const float SpringToElasticityFactor     = 0.15f; // Springの値をElasticityに一部加算する割合。形状保持の補完用。
 
-        // Pull低め時にElasticityを底上げするしきい値と最低値
-        // [NEW ②] Pull < この値のとき補正を適用
-        private const float ElasticityPullThreshold      = 0.4f;
-        // [NEW ②] 補正後のElasticityの最低保証値
-        private const float ElasticityMinimum            = 0.4f;
-
-        // Pull低め時にStiffness加算を抑制するしきい値
-        // [NEW ③] Pull < この値のとき PullDeficit 加算を 0 にする
-        private const float StiffnessPullSuppressThreshold = 0.5f;
-
-        // Short bone chain threshold
-        private const float ShortBoneThreshold           = 0.05f;
-        private const float ShortBoneStiffnessMin        = 0.95f;
-
-        // Collider radius scale factor
-        private const float ColliderRadiusScale          = 1.02857f;
+        // その他
+        private const float ColliderRadiusScale          = 1.02857f; // コライダー半径の補正倍率。PBとDBの当たり判定の微差を吸収。
+        private const float GravityV11Scale              = 0.25f;   // v1.1のGravityをDBのGravityに変換する際のスケール。単位系の差を補正。
 
         // ------------------------------------------------------------------ //
         //  Menu
@@ -251,17 +240,15 @@ namespace JayT.VRChatAvatarHelper.Editor
             db.m_Radius        = pb.radius * scaleFactor;
             db.m_RadiusDistrib = pb.radiusCurve;
 
-            // ---- [CHANGED ②] Elasticity: Pull低め時に最低値を保証 ----
             // Pull低め = DBのElasticityも低くなり「戻り」が弱くなるため補正する
             // Pull >= ElasticityPullThreshold の場合はそのまま使用
-            float elasticity = pb.pull;
-            if (elasticity < ElasticityPullThreshold)
+            float elasticity = pb.pull * ElasticityScale; // スケールダウン
+            if (elasticity < ElasticityPullThreshold * ElasticityScale)
             {
-                // Pull=0 → ElasticityMinimum、Pull=Threshold → そのまま、の線形補間
-                float t = elasticity / ElasticityPullThreshold;
-                elasticity = Mathf.Lerp(ElasticityMinimum, ElasticityPullThreshold, t);
+                float t = elasticity / (ElasticityPullThreshold * ElasticityScale);
+                elasticity = Mathf.Lerp(ElasticityMinimum, ElasticityPullThreshold * ElasticityScale, t);
                 warnings.Add($"  [{pb.gameObject.name}] Pull={pb.pull:F2} 低め " +
-                             $"→ Elasticity を {pb.pull:F2} → {elasticity:F2} に補正");
+                            $"→ Elasticity を {pb.pull * ElasticityScale:F2} → {elasticity:F2} に補正");
                 warnCount++;
             }
             db.m_Elasticity       = elasticity;
@@ -389,11 +376,14 @@ namespace JayT.VRChatAvatarHelper.Editor
         {
             var curve = pb.springCurve;
             bool isFlatOne = curve == null || curve.length == 0
-                          || IsConstantCurve(curve, out float cval) && Mathf.Approximately(cval, 1f);
+                        || IsConstantCurve(curve, out float cval) && Mathf.Approximately(cval, 1f);
 
             if (isFlatOne)
             {
-                db.m_Damping        = (1f - pb.spring) * DampingScale;
+                // Spring高め = 慣性が強い = Dampingも一定以上確保する
+                // 旧: (1f - pb.spring) * DampingScale
+                float baseDamp = (1f - pb.spring) * DampingScale;
+                db.m_Damping = Mathf.Clamp01(Mathf.Max(baseDamp, DampingMinimum));
                 db.m_DampingDistrib = null;
                 return;
             }
