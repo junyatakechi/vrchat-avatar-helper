@@ -11,12 +11,12 @@
 //   All colliders (Sphere / Capsule / Plane)
 //
 // Lossy:
-//   Spring(v1.0) / Momentum(v1.1)   -> Damping (+Curve)       
-//   MaxAngleX / Polar(Pitch,Yaw)    -> Stiffness (+Curve)     
-//   Stiffness(v1.1)                 -> Stiffness add (approx) 
-//   Spring -> Stiffness/Elasticity partial redistribution     
-//   Gravity + GravityFalloff        -> Gravity + Force        
-//   Hinge LimitType + FreezeAxis    -> FreezeAxis             
+//   Spring(v1.0) / Momentum(v1.1)   -> Damping (+Curve)       * 1:1 not possible
+//   MaxAngleX / Polar(Pitch,Yaw)    -> Stiffness (+Curve)      * angle-to-ratio approximation
+//   Stiffness(v1.1)                 -> Stiffness add (approx)  * different concepts
+//   Spring -> Stiffness/Elasticity partial redistribution       * shape retention補完
+//   Gravity + GravityFalloff        -> Gravity + Force          * v1.1 ratio support
+//   Hinge LimitType + FreezeAxis    -> FreezeAxis               * diagonal axis -> None
 //
 // Not converted (no DB equivalent):
 //   Squish, Stretch, MaxStretch, MaxSquish
@@ -56,20 +56,38 @@ namespace JayT.VRChatAvatarHelper.Editor
         private const float QuaternionTolerance = 2f;
 
         // ------------------------------------------------------------------ //
-        //  Tuning constants (adjust these during testing)
+        //  Tuning constants
         // ------------------------------------------------------------------ //
-        private const float SpringToStiffnessFactor     = 0.20f;
-        private const float SpringToElasticityFactor    = 0.15f;
-        private const float ImmobileToStiffnessFactor   = 0.30f;
-        private const float PullDeficitToStiffnessFactor = 0.20f;
-        private const float GravityV11Scale             = 0.02f;
+        private const float SpringToStiffnessFactor      = 0.20f;
+        private const float SpringToElasticityFactor     = 0.15f;
+        private const float ImmobileToStiffnessFactor    = 0.30f;
 
-        // Short bone chain: if total bone length < this threshold,
-        // enforce a minimum Stiffness to prevent visible separation.
-        // DB's maxlen = restLen * (1 - stiffness) * 2, so for short chains
-        // even a small maxlen causes visible gaps.
-        private const float ShortBoneThreshold          = 0.05f;  // meters
-        private const float ShortBoneStiffnessMin       = 0.85f;
+        // [CHANGED ①] Pull低め(柔らかい意図)をStiffness加算で固めないよう大幅に削減
+        // 旧: 0.20f → 新: 0.05f
+        private const float PullDeficitToStiffnessFactor = 0.05f;
+
+        private const float GravityV11Scale              = 0.25f;
+
+        // [CHANGED ①] Pull低め+Spring高めはDampingが詰まりやすいため緩和
+        // 旧: 0.61f → 新: 0.45f
+        private const float DampingScale                 = 0.45f;
+
+        // Pull低め時にElasticityを底上げするしきい値と最低値
+        // [NEW ②] Pull < この値のとき補正を適用
+        private const float ElasticityPullThreshold      = 0.4f;
+        // [NEW ②] 補正後のElasticityの最低保証値
+        private const float ElasticityMinimum            = 0.4f;
+
+        // Pull低め時にStiffness加算を抑制するしきい値
+        // [NEW ③] Pull < この値のとき PullDeficit 加算を 0 にする
+        private const float StiffnessPullSuppressThreshold = 0.5f;
+
+        // Short bone chain threshold
+        private const float ShortBoneThreshold           = 0.05f;
+        private const float ShortBoneStiffnessMin        = 0.95f;
+
+        // Collider radius scale factor
+        private const float ColliderRadiusScale          = 1.02857f;
 
         // ------------------------------------------------------------------ //
         //  Menu
@@ -185,11 +203,7 @@ namespace JayT.VRChatAvatarHelper.Editor
             pb.colliders = pb.colliders?.Where(c => c != null).ToList();
             if (pb.colliders?.Count == 0) pb.colliders = null;
 
-            // ---- [FIX v5] Multi-Child Type = Ignore → split into per-child DBs ----
-            // PB with Multi-Child=Ignore treats each direct child chain independently
-            // and does NOT move the root bone. DB has no equivalent; it processes all
-            // children together, and if ChildCount > 1, parent rotation is skipped,
-            // causing bone separation. Solution: create one DB per child chain.
+            // Multi-Child Type = Ignore → split into per-child DBs
             if (pb.multiChildType == VRCPhysBoneBase.MultiChildType.Ignore
                 && pb.rootTransform.childCount > 1)
             {
@@ -197,7 +211,6 @@ namespace JayT.VRChatAvatarHelper.Editor
                 for (int i = 0; i < pb.rootTransform.childCount; i++)
                 {
                     Transform child = pb.rootTransform.GetChild(i);
-                    // Skip if this child is in ignoreTransforms
                     if (pb.ignoreTransforms != null && pb.ignoreTransforms.Contains(child))
                         continue;
                     childRoots.Add(child);
@@ -210,42 +223,49 @@ namespace JayT.VRChatAvatarHelper.Editor
                     warnCount++;
 
                     foreach (var childRoot in childRoots)
-                    {
                         ConvertBoneWithRoot(pb, childRoot, warnings, ref warnCount);
-                    }
                     return;
                 }
             }
 
-            // Normal path: 1 PB → 1 DB
             ConvertBoneWithRoot(pb, null, warnings, ref warnCount);
         }
 
-        /// <summary>
-        /// Core conversion: creates a DB component from a PB.
-        /// If overrideRoot is non-null, the DB's Root is set to that transform
-        /// instead of the PB's rootTransform (used for Multi-Child splitting).
-        /// </summary>
         private void ConvertBoneWithRoot(VRCPhysBone pb, Transform overrideRoot,
                                          List<string> warnings, ref int warnCount)
         {
             Transform dbRoot = overrideRoot != null ? overrideRoot : pb.rootTransform;
 
-            var db = pb.gameObject.AddComponent<DynamicBone>();
+            GameObject attachTarget = overrideRoot != null ? overrideRoot.gameObject : pb.gameObject;
+            var db = attachTarget.AddComponent<DynamicBone>();
 
             // ---- Lossless ----
-            db.enabled              = pb.enabled;
-            db.m_Root               = dbRoot;
-            db.m_Exclusions         = pb.ignoreTransforms;
-            db.m_Elasticity         = pb.pull;
-            db.m_ElasticityDistrib  = pb.pullCurve;
-            db.m_Inert              = pb.immobile;
-            db.m_InertDistrib       = pb.immobileCurve;
+            db.enabled      = pb.enabled;
+            db.m_Root       = dbRoot;
+            db.m_Exclusions = pb.ignoreTransforms;
+            db.m_Inert      = pb.immobile;
+            db.m_InertDistrib = pb.immobileCurve;
 
             float scaleFactor = Mathf.Abs(pb.rootTransform.lossyScale.x)
                               / Mathf.Max(1e-5f, Mathf.Abs(pb.transform.lossyScale.x));
             db.m_Radius        = pb.radius * scaleFactor;
             db.m_RadiusDistrib = pb.radiusCurve;
+
+            // ---- [CHANGED ②] Elasticity: Pull低め時に最低値を保証 ----
+            // Pull低め = DBのElasticityも低くなり「戻り」が弱くなるため補正する
+            // Pull >= ElasticityPullThreshold の場合はそのまま使用
+            float elasticity = pb.pull;
+            if (elasticity < ElasticityPullThreshold)
+            {
+                // Pull=0 → ElasticityMinimum、Pull=Threshold → そのまま、の線形補間
+                float t = elasticity / ElasticityPullThreshold;
+                elasticity = Mathf.Lerp(ElasticityMinimum, ElasticityPullThreshold, t);
+                warnings.Add($"  [{pb.gameObject.name}] Pull={pb.pull:F2} 低め " +
+                             $"→ Elasticity を {pb.pull:F2} → {elasticity:F2} に補正");
+                warnCount++;
+            }
+            db.m_Elasticity       = elasticity;
+            db.m_ElasticityDistrib = pb.pullCurve;
 
             // ---- ImmobileType warning ----
             if (pb.immobileType == VRCPhysBoneBase.ImmobileType.World)
@@ -279,22 +299,13 @@ namespace JayT.VRChatAvatarHelper.Editor
             // ---- Gravity + GravityFalloff -> Gravity + Force ----
             if (pb.version == VRCPhysBoneBase.Version.Version_1_1)
             {
-                // [FIX v5] v1.1: Gravity is a "pose ratio" (not a force).
-                // DB's m_Gravity = "force that is cancelled at rest pose" — this is
-                // conceptually the closest match to PB v1.1's gravity behavior.
-                // DB's m_Force = "always-on force" — must NOT be used for v1.1.
-                //
-                // GravityFalloff reduces gravity at rest in PB, so we pre-apply it.
-                // Community typical values: m_Gravity.y = -0.005 ~ -0.01
                 float effectiveGravity = pb.gravity * (1f - pb.gravityFalloff);
                 float gVal = -effectiveGravity * GravityV11Scale;
-
                 db.m_Gravity = new Vector3(0, gVal, 0);
                 db.m_Force   = Vector3.zero;
             }
             else
             {
-                // v1.0: Gravity is a direct force, use boneLength-based conversion
                 float boneLen = Mathf.Max(1e-5f, AverageBoneLength(pb));
                 float gVal    = -pb.gravity * boneLen
                               / Mathf.Max(1e-5f, Mathf.Abs(pb.transform.lossyScale.x));
@@ -313,20 +324,20 @@ namespace JayT.VRChatAvatarHelper.Editor
             // ---- Spring / Momentum -> Damping ----
             ConvertSpringToDamping(pb, db);
 
-            // ---- Limit -> Stiffness (with Polar support) ----
+            // ---- Limit -> Stiffness ----
             ConvertLimitToStiffness(pb, db, warnings, ref warnCount);
 
-            // ---- [FIX] Spring -> partial redistribution to Stiffness/Elasticity ----
-            // PB's Spring has implicit shape retention effect that DB lacks.
-            // Compensate by adding a portion to Stiffness and Elasticity.
+            // ---- Spring -> partial redistribution to Stiffness/Elasticity ----
             db.m_Stiffness  = Mathf.Clamp01(db.m_Stiffness  + pb.spring * SpringToStiffnessFactor);
-            db.m_Elasticity = Mathf.Clamp01(db.m_Elasticity  + pb.spring * SpringToElasticityFactor);
+            db.m_Elasticity = Mathf.Clamp01(db.m_Elasticity + pb.spring * SpringToElasticityFactor);
 
-            // ---- [FIX] Immobile/Pull -> Stiffness base value ----
-            // PB retains shape through the combination of Immobile + Pull.
-            // DB relies primarily on Stiffness for this, so we add a base value.
-            float baseStiffness = pb.immobile * ImmobileToStiffnessFactor
-                                + (1f - pb.pull) * PullDeficitToStiffnessFactor;
+            // ---- [CHANGED ③] Immobile/Pull -> Stiffness base value ----
+            // Pull低め(柔らかい意図)の場合は PullDeficit 加算を抑制し固くなるのを防ぐ
+            float pullDeficitAdd = pb.pull < StiffnessPullSuppressThreshold
+                ? 0f  // Pull低め → 加算しない
+                : (1f - pb.pull) * PullDeficitToStiffnessFactor;
+
+            float baseStiffness = pb.immobile * ImmobileToStiffnessFactor + pullDeficitAdd;
             db.m_Stiffness = Mathf.Clamp01(db.m_Stiffness + baseStiffness);
 
             // ---- v1.1 specific fields ----
@@ -346,10 +357,7 @@ namespace JayT.VRChatAvatarHelper.Editor
                 }
             }
 
-            // ---- [FIX v5] Short bone chain Stiffness minimum ----
-            // DB's maxlen = restLen * (1 - stiffness) * 2.
-            // For short chains (earrings, small accessories), even a small maxlen
-            // causes visible bone separation. Enforce a minimum Stiffness.
+            // ---- Short bone chain Stiffness minimum ----
             float avgBoneLen = AverageBoneLength(pb);
             if (avgBoneLen > 0f && avgBoneLen < ShortBoneThreshold
                 && db.m_Stiffness < ShortBoneStiffnessMin)
@@ -385,13 +393,13 @@ namespace JayT.VRChatAvatarHelper.Editor
 
             if (isFlatOne)
             {
-                db.m_Damping        = 1f - pb.spring;
+                db.m_Damping        = (1f - pb.spring) * DampingScale;
                 db.m_DampingDistrib = null;
                 return;
             }
 
             float maxDamp = CurveAbsMax(curve, 1f, -1f);
-            db.m_Damping = Mathf.Clamp01(maxDamp);
+            db.m_Damping = Mathf.Clamp01(maxDamp * DampingScale);
 
             var kfs = new Keyframe[curve.length];
             for (int i = 0; i < curve.length; i++)
@@ -406,17 +414,11 @@ namespace JayT.VRChatAvatarHelper.Editor
         }
 
         // ------------------------------------------------------------------ //
-        //  [FIX] Limit -> Stiffness conversion (Polar / Angle / Hinge / None)
-        //  Replaces old ConvertAngleToStiffness:
-        //  - Polar: weighted average of MaxPitch(maxAngleX) and MaxYaw(maxAngleZ)
-        //  - Angle/Hinge: maxAngleX only (as before)
-        //  - None: limit-derived Stiffness = 0 (base value added later)
+        //  Limit -> Stiffness conversion
         // ------------------------------------------------------------------ //
         private void ConvertLimitToStiffness(VRCPhysBone pb, DynamicBone db,
                                               List<string> warnings, ref int warnCount)
         {
-            // No limit -> no limit-derived stiffness
-            // (base value from Immobile/Pull/Spring is added in ConvertBone)
             if (pb.limitType == VRCPhysBoneBase.LimitType.None)
             {
                 db.m_Stiffness        = 0f;
@@ -424,12 +426,9 @@ namespace JayT.VRChatAvatarHelper.Editor
                 return;
             }
 
-            // ---- Compute effective angle ----
             float effectiveAngle;
             if (pb.limitType == VRCPhysBoneBase.LimitType.Polar)
             {
-                // Polar: weighted average biased toward the tighter axis (smaller angle)
-                // to better represent the overall constraint strength
                 float minAngle = Mathf.Min(pb.maxAngleX, pb.maxAngleZ);
                 float maxAngle = Mathf.Max(pb.maxAngleX, pb.maxAngleZ);
                 effectiveAngle = minAngle * 0.7f + maxAngle * 0.3f;
@@ -439,11 +438,9 @@ namespace JayT.VRChatAvatarHelper.Editor
             }
             else
             {
-                // Angle / Hinge: use maxAngleX directly
                 effectiveAngle = pb.maxAngleX;
             }
 
-            // ---- Without curve ----
             var curve = pb.maxAngleXCurve;
             bool isFlatOne = curve == null || curve.length == 0
                           || IsConstantCurve(curve, out float cval) && Mathf.Approximately(cval, 1f);
@@ -455,7 +452,6 @@ namespace JayT.VRChatAvatarHelper.Editor
                 return;
             }
 
-            // ---- With curve ----
             var trueCurve = BuildStiffnessCurve(curve, effectiveAngle);
             float maxStiff = Mathf.Clamp01(CurveAbsMax(trueCurve, 0f, 1f));
             db.m_Stiffness = maxStiff;
@@ -472,7 +468,6 @@ namespace JayT.VRChatAvatarHelper.Editor
             db.m_StiffnessDistrib = distrib;
         }
 
-        // [FIX] Takes effectiveAngle instead of hardcoded 180
         private AnimationCurve BuildStiffnessCurve(AnimationCurve angleCurve, float baseAngle)
         {
             var kfs = new Keyframe[angleCurve.length];
@@ -510,7 +505,7 @@ namespace JayT.VRChatAvatarHelper.Editor
             dc.m_Center    = pos;
             dc.m_Direction = dir;
             dc.m_Bound     = bound;
-            dc.m_Radius    = r;
+            dc.m_Radius    = r * ColliderRadiusScale;
             dc.m_Height    = h;
             _dbcList.Add(dc);
         }
