@@ -65,7 +65,12 @@ namespace JayT.VRChatAvatarHelper.Editor
                 "VRCHeadChop",
                 "VRCIKFollower",            // 非推奨だが残存する場合あり
 
-                // ===== NDMF Portable Components =====
+                // ===== NDMF Runtime Components =====
+                "NDMFAvatarRoot",
+                "NDMFViewpoint",
+                "PortableBlendshapeVisemes",
+
+                // ===== NDMF Portable Dynamic Bone =====
                 "PortableDynamicBone",
                 "PortableDynamicBoneCollider",
             };
