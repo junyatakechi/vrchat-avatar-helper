@@ -57,6 +57,18 @@ namespace JayT.VRChatAvatarHelper.Facial
                      "値は weightTrackingScale 適用後にクランプされます。\n" +
                      "左: iFacialMocap名 / 中: 最小値 / 右: 最大値")]
             public LimitEntry[] limiters;
+
+            [Header("Eye Bone")]
+            [Tooltip("このアバターの眼球ボーン回転を有効にする")]
+            public bool enableEyeBone = true;
+            [Tooltip("左眼球ボーン。eyeLookXxx_L の値で localRotation を制御します。")]
+            public Transform leftEyeBone;
+            [Tooltip("右眼球ボーン。eyeLookXxx_R の値で localRotation を制御します。")]
+            public Transform rightEyeBone;
+            [Tooltip("眼球の上下回転スケール (度単位)。負値で上下を反転。")]
+            public float eyeVerticalScale = 15f;
+            [Tooltip("眼球の左右回転スケール (度単位)。負値で左右を反転。")]
+            public float eyeHorizontalScale = 15f;
         }
 
         [Header("Source")]
@@ -83,7 +95,9 @@ namespace JayT.VRChatAvatarHelper.Facial
         [Tooltip("口のトラッキングを適用する (mouth*)")]
         public bool enableMouth = true;
         [Tooltip("顎・舌・頬のトラッキングを適用する (jaw*, cheek*, tongueOut)")]
-        public bool enableJaw   = true;
+        public bool enableJaw     = true;
+        [Tooltip("眼球ボーン回転を適用する (全アバター共通)")]
+        public bool enableEyeBone = true;
 
         // iFacialMocap省略名 (_L/_R) → ARKit標準名 (Left/Right) の固定マッピング
         private static readonly Dictionary<string, string> NameMapping = new Dictionary<string, string>
@@ -133,6 +147,14 @@ namespace JayT.VRChatAvatarHelper.Facial
             public SkinnedMeshRenderer smr;
             public Dictionary<string, int>    blendShapeIndex;
             public Dictionary<string, string> overrideMap;
+
+            // 眼球ボーン
+            public Transform leftEyeBone;
+            public Transform rightEyeBone;
+
+            // 眼球の視線アキュムレーター (HandleData ごとにリセット、weightTrackingScale 適用済み)
+            public float eyeUpL, eyeDownL, eyeInL, eyeOutL;
+            public float eyeUpR, eyeDownR, eyeInR, eyeOutR;
         }
 
         private List<AvatarCache> avatarCaches;
@@ -185,6 +207,9 @@ namespace JayT.VRChatAvatarHelper.Facial
                     }
                 }
 
+                cache.leftEyeBone  = target.leftEyeBone;
+                cache.rightEyeBone = target.rightEyeBone;
+
                 avatarCaches.Add(cache);
             }
 
@@ -195,6 +220,13 @@ namespace JayT.VRChatAvatarHelper.Facial
         private void HandleData(string data)
         {
             if (string.IsNullOrEmpty(data)) return;
+
+            // 眼球アキュムレーターを毎フレームリセット
+            foreach (var cache in avatarCaches)
+            {
+                cache.eyeUpL = cache.eyeDownL = cache.eyeInL = cache.eyeOutL = 0f;
+                cache.eyeUpR = cache.eyeDownR = cache.eyeInR = cache.eyeOutR = 0f;
+            }
 
             var tokens = data.Split('|');
             foreach (var token in tokens)
@@ -217,8 +249,15 @@ namespace JayT.VRChatAvatarHelper.Facial
                 val *= weightTrackingScale;
 
                 foreach (var cache in avatarCaches)
+                {
                     ApplyToAvatar(cache, ifmName, val);
+                    UpdateEyeLookAccum(cache, ifmName, val);
+                }
             }
+
+            // 全トークン処理後に眼球ボーン回転を適用
+            foreach (var cache in avatarCaches)
+                ApplyEyeBones(cache);
         }
 
         // パラメーター名のプレフィックスでグループを判定し、そのグループが有効かを返す
@@ -272,6 +311,51 @@ namespace JayT.VRChatAvatarHelper.Facial
 
             cache.smr.SetBlendShapeWeight(idx, Mathf.Clamp(val, 0f, 100f));
             return true;
+        }
+
+        // eyeLookXxx 系のパラメーターのみアキュムレーターに積む (_L/_R と Left/Right 両形式対応)
+        private static void UpdateEyeLookAccum(AvatarCache cache, string ifmName, float val)
+        {
+            switch (ifmName)
+            {
+                case "eyeLookUp_L":    case "eyeLookUpLeft":    cache.eyeUpL   = val; break;
+                case "eyeLookDown_L":  case "eyeLookDownLeft":  cache.eyeDownL = val; break;
+                case "eyeLookIn_L":    case "eyeLookInLeft":    cache.eyeInL   = val; break;
+                case "eyeLookOut_L":   case "eyeLookOutLeft":   cache.eyeOutL  = val; break;
+                case "eyeLookUp_R":    case "eyeLookUpRight":   cache.eyeUpR   = val; break;
+                case "eyeLookDown_R":  case "eyeLookDownRight": cache.eyeDownR = val; break;
+                case "eyeLookIn_R":    case "eyeLookInRight":   cache.eyeInR   = val; break;
+                case "eyeLookOut_R":   case "eyeLookOutRight":  cache.eyeOutR  = val; break;
+            }
+        }
+
+        // 眼球ボーンの localRotation を視線アキュムレーターから計算して適用する
+        // X 軸: 正 = 下、負 = 上
+        // Y 軸: 左目は正 = 外向き、右目は正 = 内向き (= 両目とも右を向く場合に正の Y)
+        private void ApplyEyeBones(AvatarCache cache)
+        {
+            if (!enableEyeBone) return;
+
+            var target = avatarTargets[cache.targetIdx];
+            if (!target.enableEyeBone) return;
+
+            if (cache.leftEyeBone == null && cache.rightEyeBone == null) return;
+            float vScale = target.eyeVerticalScale;
+            float hScale = target.eyeHorizontalScale;
+
+            if (cache.leftEyeBone != null)
+            {
+                float xRot = (cache.eyeDownL - cache.eyeUpL)  / 100f * vScale;
+                float yRot = (cache.eyeOutL  - cache.eyeInL)  / 100f * hScale;
+                cache.leftEyeBone.localRotation = Quaternion.Euler(xRot, yRot, 0f);
+            }
+
+            if (cache.rightEyeBone != null)
+            {
+                float xRot = (cache.eyeDownR - cache.eyeUpR)  / 100f * vScale;
+                float yRot = (cache.eyeInR   - cache.eyeOutR) / 100f * hScale;
+                cache.rightEyeBone.localRotation = Quaternion.Euler(xRot, yRot, 0f);
+            }
         }
     }
 
