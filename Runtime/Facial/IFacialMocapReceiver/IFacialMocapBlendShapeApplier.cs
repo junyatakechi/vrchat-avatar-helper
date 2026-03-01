@@ -42,6 +42,17 @@ namespace JayT.VRChatAvatarHelper.Facial
             [HideInInspector] public bool initialized;
         }
 
+        /// <summary>グループごとの有効フラグとスムージング強度のセット</summary>
+        [Serializable]
+        public struct GroupSetting
+        {
+            [Tooltip("このグループのトラッキングを有効にする")]
+            public bool enabled;
+            [Tooltip("スムージング強度。0=即時追従、1に近いほど遅く滑らか")]
+            [Range(0f, 1f)]
+            public float smoothing;
+        }
+
         /// <summary>アバター1体分の設定</summary>
         [Serializable]
         public class AvatarTarget
@@ -79,32 +90,25 @@ namespace JayT.VRChatAvatarHelper.Facial
         [Tooltip("アバターごとの設定 (複数アバターに同時適用可)")]
         public AvatarTarget[] avatarTargets;
 
-        [Header("Settings")]
+        [Header("TrackingSetting")]
         [Tooltip("トラッキング生値 (0–100) に最前段で掛ける倍率。\n" +
                  "例: 0.5 で動きを抑制、1.5 で大げさに。リミッターはこの後に適用されます。")]
         [Range(0f, 3f)]
         public float weightTrackingScale = 1f;
 
-        [Tooltip("スムージング強度。\n" +
-                 "0 = スムージングなし (即時追従)\n" +
-                 "1 に近づくほど追従が遅く滑らかになります。\n" +
-                 "内部的に指数移動平均を使用しフレームレートに依存しません。")]
-        [Range(0f, 1f)]
-        public float smoothing = 0f;
-
         [Header("Group Filters")]
-        [Tooltip("目のトラッキングを適用する (eye*)")]
-        public bool enableEye   = true;
-        [Tooltip("眉のトラッキングを適用する (brow*)")]
-        public bool enableBrow  = true;
-        [Tooltip("鼻のトラッキングを適用する (nose*)")]
-        public bool enableNose  = true;
-        [Tooltip("口のトラッキングを適用する (mouth*)")]
-        public bool enableMouth = true;
-        [Tooltip("顎・舌・頬のトラッキングを適用する (jaw*, cheek*, tongueOut)")]
-        public bool enableJaw     = true;
-        [Tooltip("眼球ボーン回転を適用する (全アバター共通)")]
-        public bool enableEyeBone = true;
+        [Tooltip("目のBlendShapeトラッキング (eye*)")]
+        public GroupSetting eye     = new GroupSetting { enabled = true };
+        [Tooltip("眉のBlendShapeトラッキング (brow*)")]
+        public GroupSetting brow    = new GroupSetting { enabled = true };
+        [Tooltip("鼻のBlendShapeトラッキング (nose*)")]
+        public GroupSetting nose    = new GroupSetting { enabled = true };
+        [Tooltip("口のBlendShapeトラッキング (mouth*)")]
+        public GroupSetting mouth   = new GroupSetting { enabled = true };
+        [Tooltip("顎・舌・頬のBlendShapeトラッキング (jaw*, cheek*, tongueOut)")]
+        public GroupSetting jaw     = new GroupSetting { enabled = true };
+        [Tooltip("眼球ボーン回転 (全アバター共通)")]
+        public GroupSetting eyeBone = new GroupSetting { enabled = true };
 
         // iFacialMocap省略名 (_L/_R) → ARKit標準名 (Left/Right) の固定マッピング
         private static readonly Dictionary<string, string> NameMapping = new Dictionary<string, string>
@@ -163,9 +167,10 @@ namespace JayT.VRChatAvatarHelper.Facial
             public float eyeUpL, eyeDownL, eyeInL, eyeOutL;
             public float eyeUpR, eyeDownR, eyeInR, eyeOutR;
 
-            // スムージング: BlendShape ごとの目標値と現在のスムージング済み値
-            public Dictionary<string, float> targetValues  = new Dictionary<string, float>(StringComparer.Ordinal);
-            public Dictionary<string, float> smoothedValues = new Dictionary<string, float>(StringComparer.Ordinal);
+            // スムージング: BlendShape ごとの目標値・グループスムージング値・スムージング済み値
+            public Dictionary<string, float> targetValues   = new Dictionary<string, float>(StringComparer.Ordinal);
+            public Dictionary<string, float> targetSmoothing = new Dictionary<string, float>(StringComparer.Ordinal);
+            public Dictionary<string, float> smoothedValues  = new Dictionary<string, float>(StringComparer.Ordinal);
 
             // 眼球ボーンのスムージング済み値
             public float smoothedEyeUpL, smoothedEyeDownL, smoothedEyeInL, smoothedEyeOutL;
@@ -178,18 +183,17 @@ namespace JayT.VRChatAvatarHelper.Facial
         {
             if (avatarCaches == null || avatarCaches.Count == 0) return;
 
-            // smoothing=0 のとき factor=1 (即時)、1に近いほど factor が小さく滑らか
-            // Mathf.Pow(smoothing, dt*60) は 60fps 規格化の指数移動平均
-            float lerpFactor = smoothing < 0.0001f
-                ? 1f
-                : 1f - Mathf.Pow(smoothing, Time.deltaTime * 60f);
+            float dt60 = Time.deltaTime * 60f;
 
             foreach (var cache in avatarCaches)
             {
-                // BlendShape スムージング適用
+                // BlendShape スムージング適用 (BlendShape ごとにグループのスムージング値を使用)
                 foreach (var kv in cache.targetValues)
                 {
                     if (!cache.blendShapeIndex.TryGetValue(kv.Key, out int idx)) continue;
+
+                    cache.targetSmoothing.TryGetValue(kv.Key, out float s);
+                    float lerpFactor = s < 0.0001f ? 1f : 1f - Mathf.Pow(s, dt60);
 
                     if (!cache.smoothedValues.TryGetValue(kv.Key, out float cur))
                         cur = kv.Value; // 初回は即時セット (スナップを防ぐ)
@@ -200,7 +204,7 @@ namespace JayT.VRChatAvatarHelper.Facial
                 }
 
                 // 眼球ボーン スムージング & 適用
-                ApplyEyeBonesSmoothed(cache, lerpFactor);
+                ApplyEyeBonesSmoothed(cache, dt60);
             }
         }
 
@@ -305,18 +309,33 @@ namespace JayT.VRChatAvatarHelper.Facial
         // パラメーター名のプレフィックスでグループを判定し、そのグループが有効かを返す
         private bool IsGroupEnabled(string ifmName)
         {
-            if (ifmName.StartsWith("eye"))    return enableEye;
-            if (ifmName.StartsWith("brow"))   return enableBrow;
-            if (ifmName.StartsWith("nose"))   return enableNose;
-            if (ifmName.StartsWith("mouth"))  return enableMouth;
-            if (ifmName.StartsWith("jaw")  ||
-                ifmName.StartsWith("cheek")||
-                ifmName == "tongueOut")       return enableJaw;
+            if (ifmName.StartsWith("eye"))   return eye.enabled;
+            if (ifmName.StartsWith("brow"))  return brow.enabled;
+            if (ifmName.StartsWith("nose"))  return nose.enabled;
+            if (ifmName.StartsWith("mouth")) return mouth.enabled;
+            if (ifmName.StartsWith("jaw") ||
+                ifmName.StartsWith("cheek") ||
+                ifmName == "tongueOut")      return jaw.enabled;
             return true; // 未分類は常に通す
+        }
+
+        // パラメーター名のプレフィックスでグループのスムージング値 (0–1) を返す
+        private float GetGroupSmoothing(string ifmName)
+        {
+            if (ifmName.StartsWith("eye"))   return eye.smoothing;
+            if (ifmName.StartsWith("brow"))  return brow.smoothing;
+            if (ifmName.StartsWith("nose"))  return nose.smoothing;
+            if (ifmName.StartsWith("mouth")) return mouth.smoothing;
+            if (ifmName.StartsWith("jaw") ||
+                ifmName.StartsWith("cheek") ||
+                ifmName == "tongueOut")      return jaw.smoothing;
+            return 0f;
         }
 
         private void ApplyToAvatar(AvatarCache cache, string ifmName, float val)
         {
+            float groupSmoothing = GetGroupSmoothing(ifmName);
+
             // リミッターを avatarTargets から直接読む (再生中の変更が即時反映される)
             var limiters = avatarTargets[cache.targetIdx].limiters;
             if (limiters != null)
@@ -334,24 +353,25 @@ namespace JayT.VRChatAvatarHelper.Facial
             // Override マッピング (最優先)
             if (cache.overrideMap.TryGetValue(ifmName, out string overrideName))
             {
-                TryApply(cache, overrideName, val);
+                TryApply(cache, overrideName, val, groupSmoothing);
                 return;
             }
 
             // 直接マッチ
-            if (TryApply(cache, ifmName, val)) return;
+            if (TryApply(cache, ifmName, val, groupSmoothing)) return;
 
             // 固定マッピングテーブル
             if (NameMapping.TryGetValue(ifmName, out string arKitName))
-                TryApply(cache, arKitName, val);
+                TryApply(cache, arKitName, val, groupSmoothing);
         }
 
-        private bool TryApply(AvatarCache cache, string blendShapeName, float val)
+        private bool TryApply(AvatarCache cache, string blendShapeName, float val, float groupSmoothing)
         {
             if (!cache.blendShapeIndex.ContainsKey(blendShapeName))
                 return false;
 
-            cache.targetValues[blendShapeName] = Mathf.Clamp(val, 0f, 100f);
+            cache.targetValues[blendShapeName]   = Mathf.Clamp(val, 0f, 100f);
+            cache.targetSmoothing[blendShapeName] = groupSmoothing;
             return true;
         }
 
@@ -374,14 +394,17 @@ namespace JayT.VRChatAvatarHelper.Facial
         // 眼球ボーンの localRotation を視線アキュムレーターからスムージングして適用する
         // X 軸: 正 = 下、負 = 上
         // Y 軸: 左目は正 = 外向き、右目は正 = 内向き (= 両目とも右を向く場合に正の Y)
-        private void ApplyEyeBonesSmoothed(AvatarCache cache, float lerpFactor)
+        private void ApplyEyeBonesSmoothed(AvatarCache cache, float dt60)
         {
-            if (!enableEyeBone) return;
+            if (!eyeBone.enabled) return;
 
             var target = avatarTargets[cache.targetIdx];
             if (!target.enableEyeBone) return;
 
             if (cache.leftEyeBone == null && cache.rightEyeBone == null) return;
+
+            float s = eyeBone.smoothing;
+            float lerpFactor = s < 0.0001f ? 1f : 1f - Mathf.Pow(s, dt60);
 
             cache.smoothedEyeUpL   = Mathf.Lerp(cache.smoothedEyeUpL,   cache.eyeUpL,   lerpFactor);
             cache.smoothedEyeDownL = Mathf.Lerp(cache.smoothedEyeDownL, cache.eyeDownL, lerpFactor);
@@ -562,6 +585,42 @@ namespace JayT.VRChatAvatarHelper.Facial
             // min <= max を保証
             if (minProp.floatValue > maxProp.floatValue)
                 maxProp.floatValue = minProp.floatValue;
+
+            EditorGUI.EndProperty();
+        }
+
+        public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
+            => EditorGUIUtility.singleLineHeight;
+    }
+
+    /// <summary>
+    /// GroupSetting を1行で表示: [ラベル] [☑ 有効] [====スムージングスライダー====]
+    /// </summary>
+    [CustomPropertyDrawer(typeof(IFacialMocapBlendShapeApplier.GroupSetting))]
+    public class GroupSettingDrawer : PropertyDrawer
+    {
+        public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
+        {
+            EditorGUI.BeginProperty(position, label, property);
+
+            var enabledProp = property.FindPropertyRelative("enabled");
+            var smoothProp  = property.FindPropertyRelative("smoothing");
+
+            float labelW  = EditorGUIUtility.labelWidth;
+            float toggleW = 16f;
+            float gap     = 4f;
+            float sliderW = position.width - labelW - toggleW - gap;
+
+            var labelRect  = new Rect(position.x,                          position.y, labelW,  position.height);
+            var toggleRect = new Rect(position.x + labelW,                 position.y, toggleW, position.height);
+            var sliderRect = new Rect(position.x + labelW + toggleW + gap, position.y, sliderW, position.height);
+
+            EditorGUI.LabelField(labelRect, label);
+            enabledProp.boolValue = EditorGUI.Toggle(toggleRect, enabledProp.boolValue);
+
+            EditorGUI.BeginDisabledGroup(!enabledProp.boolValue);
+            smoothProp.floatValue = EditorGUI.Slider(sliderRect, smoothProp.floatValue, 0f, 1f);
+            EditorGUI.EndDisabledGroup();
 
             EditorGUI.EndProperty();
         }
