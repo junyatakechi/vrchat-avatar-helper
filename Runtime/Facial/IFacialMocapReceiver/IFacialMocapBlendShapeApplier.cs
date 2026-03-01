@@ -73,6 +73,18 @@ namespace JayT.VRChatAvatarHelper.Facial
         [Range(0f, 3f)]
         public float weightTrackingScale = 1f;
 
+        [Header("Group Filters")]
+        [Tooltip("目のトラッキングを適用する (eye*)")]
+        public bool enableEye   = true;
+        [Tooltip("眉のトラッキングを適用する (brow*)")]
+        public bool enableBrow  = true;
+        [Tooltip("鼻のトラッキングを適用する (nose*)")]
+        public bool enableNose  = true;
+        [Tooltip("口のトラッキングを適用する (mouth*)")]
+        public bool enableMouth = true;
+        [Tooltip("顎・舌・頬のトラッキングを適用する (jaw*, cheek*, tongueOut)")]
+        public bool enableJaw   = true;
+
         // iFacialMocap省略名 (_L/_R) → ARKit標準名 (Left/Right) の固定マッピング
         private static readonly Dictionary<string, string> NameMapping = new Dictionary<string, string>
         {
@@ -198,12 +210,28 @@ namespace JayT.VRChatAvatarHelper.Facial
                 if (!float.TryParse(valueStr, NumberStyles.Float, CultureInfo.InvariantCulture, out float val))
                     continue;
 
+                // グループフィルター (再生中も即時反映)
+                if (!IsGroupEnabled(ifmName)) continue;
+
                 // 最前段: トラッキング生値に weightTrackingScale を乗算
                 val *= weightTrackingScale;
 
                 foreach (var cache in avatarCaches)
                     ApplyToAvatar(cache, ifmName, val);
             }
+        }
+
+        // パラメーター名のプレフィックスでグループを判定し、そのグループが有効かを返す
+        private bool IsGroupEnabled(string ifmName)
+        {
+            if (ifmName.StartsWith("eye"))    return enableEye;
+            if (ifmName.StartsWith("brow"))   return enableBrow;
+            if (ifmName.StartsWith("nose"))   return enableNose;
+            if (ifmName.StartsWith("mouth"))  return enableMouth;
+            if (ifmName.StartsWith("jaw")  ||
+                ifmName.StartsWith("cheek")||
+                ifmName == "tongueOut")       return enableJaw;
+            return true; // 未分類は常に通す
         }
 
         private void ApplyToAvatar(AvatarCache cache, string ifmName, float val)
