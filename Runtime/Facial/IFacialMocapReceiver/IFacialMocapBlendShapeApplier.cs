@@ -85,6 +85,13 @@ namespace JayT.VRChatAvatarHelper.Facial
         [Range(0f, 3f)]
         public float weightTrackingScale = 1f;
 
+        [Tooltip("スムージング強度。\n" +
+                 "0 = スムージングなし (即時追従)\n" +
+                 "1 に近づくほど追従が遅く滑らかになります。\n" +
+                 "内部的に指数移動平均を使用しフレームレートに依存しません。")]
+        [Range(0f, 1f)]
+        public float smoothing = 0f;
+
         [Header("Group Filters")]
         [Tooltip("目のトラッキングを適用する (eye*)")]
         public bool enableEye   = true;
@@ -152,12 +159,50 @@ namespace JayT.VRChatAvatarHelper.Facial
             public Transform leftEyeBone;
             public Transform rightEyeBone;
 
-            // 眼球の視線アキュムレーター (HandleData ごとにリセット、weightTrackingScale 適用済み)
+            // 眼球の視線アキュムレーター (HandleData ごとにリセット、weightTrackingScale 適用済み) = 目標値
             public float eyeUpL, eyeDownL, eyeInL, eyeOutL;
             public float eyeUpR, eyeDownR, eyeInR, eyeOutR;
+
+            // スムージング: BlendShape ごとの目標値と現在のスムージング済み値
+            public Dictionary<string, float> targetValues  = new Dictionary<string, float>(StringComparer.Ordinal);
+            public Dictionary<string, float> smoothedValues = new Dictionary<string, float>(StringComparer.Ordinal);
+
+            // 眼球ボーンのスムージング済み値
+            public float smoothedEyeUpL, smoothedEyeDownL, smoothedEyeInL, smoothedEyeOutL;
+            public float smoothedEyeUpR, smoothedEyeDownR, smoothedEyeInR, smoothedEyeOutR;
         }
 
         private List<AvatarCache> avatarCaches;
+
+        void Update()
+        {
+            if (avatarCaches == null || avatarCaches.Count == 0) return;
+
+            // smoothing=0 のとき factor=1 (即時)、1に近いほど factor が小さく滑らか
+            // Mathf.Pow(smoothing, dt*60) は 60fps 規格化の指数移動平均
+            float lerpFactor = smoothing < 0.0001f
+                ? 1f
+                : 1f - Mathf.Pow(smoothing, Time.deltaTime * 60f);
+
+            foreach (var cache in avatarCaches)
+            {
+                // BlendShape スムージング適用
+                foreach (var kv in cache.targetValues)
+                {
+                    if (!cache.blendShapeIndex.TryGetValue(kv.Key, out int idx)) continue;
+
+                    if (!cache.smoothedValues.TryGetValue(kv.Key, out float cur))
+                        cur = kv.Value; // 初回は即時セット (スナップを防ぐ)
+
+                    float next = Mathf.Lerp(cur, kv.Value, lerpFactor);
+                    cache.smoothedValues[kv.Key] = next;
+                    cache.smr.SetBlendShapeWeight(idx, next);
+                }
+
+                // 眼球ボーン スムージング & 適用
+                ApplyEyeBonesSmoothed(cache, lerpFactor);
+            }
+        }
 
         void OnEnable()
         {
@@ -255,9 +300,6 @@ namespace JayT.VRChatAvatarHelper.Facial
                 }
             }
 
-            // 全トークン処理後に眼球ボーン回転を適用
-            foreach (var cache in avatarCaches)
-                ApplyEyeBones(cache);
         }
 
         // パラメーター名のプレフィックスでグループを判定し、そのグループが有効かを返す
@@ -306,10 +348,10 @@ namespace JayT.VRChatAvatarHelper.Facial
 
         private bool TryApply(AvatarCache cache, string blendShapeName, float val)
         {
-            if (!cache.blendShapeIndex.TryGetValue(blendShapeName, out int idx))
+            if (!cache.blendShapeIndex.ContainsKey(blendShapeName))
                 return false;
 
-            cache.smr.SetBlendShapeWeight(idx, Mathf.Clamp(val, 0f, 100f));
+            cache.targetValues[blendShapeName] = Mathf.Clamp(val, 0f, 100f);
             return true;
         }
 
@@ -329,10 +371,10 @@ namespace JayT.VRChatAvatarHelper.Facial
             }
         }
 
-        // 眼球ボーンの localRotation を視線アキュムレーターから計算して適用する
+        // 眼球ボーンの localRotation を視線アキュムレーターからスムージングして適用する
         // X 軸: 正 = 下、負 = 上
         // Y 軸: 左目は正 = 外向き、右目は正 = 内向き (= 両目とも右を向く場合に正の Y)
-        private void ApplyEyeBones(AvatarCache cache)
+        private void ApplyEyeBonesSmoothed(AvatarCache cache, float lerpFactor)
         {
             if (!enableEyeBone) return;
 
@@ -340,20 +382,30 @@ namespace JayT.VRChatAvatarHelper.Facial
             if (!target.enableEyeBone) return;
 
             if (cache.leftEyeBone == null && cache.rightEyeBone == null) return;
+
+            cache.smoothedEyeUpL   = Mathf.Lerp(cache.smoothedEyeUpL,   cache.eyeUpL,   lerpFactor);
+            cache.smoothedEyeDownL = Mathf.Lerp(cache.smoothedEyeDownL, cache.eyeDownL, lerpFactor);
+            cache.smoothedEyeInL   = Mathf.Lerp(cache.smoothedEyeInL,   cache.eyeInL,   lerpFactor);
+            cache.smoothedEyeOutL  = Mathf.Lerp(cache.smoothedEyeOutL,  cache.eyeOutL,  lerpFactor);
+            cache.smoothedEyeUpR   = Mathf.Lerp(cache.smoothedEyeUpR,   cache.eyeUpR,   lerpFactor);
+            cache.smoothedEyeDownR = Mathf.Lerp(cache.smoothedEyeDownR, cache.eyeDownR, lerpFactor);
+            cache.smoothedEyeInR   = Mathf.Lerp(cache.smoothedEyeInR,   cache.eyeInR,   lerpFactor);
+            cache.smoothedEyeOutR  = Mathf.Lerp(cache.smoothedEyeOutR,  cache.eyeOutR,  lerpFactor);
+
             float vScale = target.eyeVerticalScale;
             float hScale = target.eyeHorizontalScale;
 
             if (cache.leftEyeBone != null)
             {
-                float xRot = (cache.eyeDownL - cache.eyeUpL)  / 100f * vScale;
-                float yRot = (cache.eyeOutL  - cache.eyeInL)  / 100f * hScale;
+                float xRot = (cache.smoothedEyeDownL - cache.smoothedEyeUpL)  / 100f * vScale;
+                float yRot = (cache.smoothedEyeOutL  - cache.smoothedEyeInL)  / 100f * hScale;
                 cache.leftEyeBone.localRotation = Quaternion.Euler(xRot, yRot, 0f);
             }
 
             if (cache.rightEyeBone != null)
             {
-                float xRot = (cache.eyeDownR - cache.eyeUpR)  / 100f * vScale;
-                float yRot = (cache.eyeInR   - cache.eyeOutR) / 100f * hScale;
+                float xRot = (cache.smoothedEyeDownR - cache.smoothedEyeUpR)  / 100f * vScale;
+                float yRot = (cache.smoothedEyeInR   - cache.smoothedEyeOutR) / 100f * hScale;
                 cache.rightEyeBone.localRotation = Quaternion.Euler(xRot, yRot, 0f);
             }
         }
