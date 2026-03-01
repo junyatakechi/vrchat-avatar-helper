@@ -77,8 +77,9 @@ namespace JayT.VRChatAvatarHelper.Facial
             { "mouthStretch_R", "mouthStretchRight" },
         };
 
-        // BlendShape名 → (SkinnedMeshRenderer, インデックス) のキャッシュ
-        private Dictionary<string, (SkinnedMeshRenderer smr, int idx)> blendShapeCache;
+        // BlendShape名 → [(SkinnedMeshRenderer, インデックス), ...] のキャッシュ
+        // 複数のアバターが同じBlendShape名を持つ場合を考慮してList<>で保持する
+        private Dictionary<string, List<(SkinnedMeshRenderer smr, int idx)>> blendShapeCache;
 
         void OnEnable()
         {
@@ -98,7 +99,7 @@ namespace JayT.VRChatAvatarHelper.Facial
 
         private void BuildCache()
         {
-            blendShapeCache = new Dictionary<string, (SkinnedMeshRenderer, int)>(StringComparer.Ordinal);
+            blendShapeCache = new Dictionary<string, List<(SkinnedMeshRenderer, int)>>(StringComparer.Ordinal);
 
             if (targetRenderers == null) return;
 
@@ -110,12 +111,16 @@ namespace JayT.VRChatAvatarHelper.Facial
                 for (int i = 0; i < mesh.blendShapeCount; i++)
                 {
                     string name = mesh.GetBlendShapeName(i);
-                    if (!blendShapeCache.ContainsKey(name))
-                        blendShapeCache[name] = (smr, i);
+                    if (!blendShapeCache.TryGetValue(name, out var list))
+                    {
+                        list = new List<(SkinnedMeshRenderer, int)>();
+                        blendShapeCache[name] = list;
+                    }
+                    list.Add((smr, i));
                 }
             }
 
-            Debug.Log($"[IFacialMocapBlendShapeApplier] BlendShapeキャッシュ構築完了: {blendShapeCache.Count} 個", this);
+            Debug.Log($"[IFacialMocapBlendShapeApplier] BlendShapeキャッシュ構築完了: {blendShapeCache.Count} 種類", this);
         }
 
         // メインスレッドから呼ばれる (IFacialMocapReceiver.ParseAndApplyData → OnDataReceived)
@@ -141,20 +146,22 @@ namespace JayT.VRChatAvatarHelper.Facial
                 val *= weightScale;
 
                 // 1. 直接マッチ
-                if (TryApply(ifmName, val)) continue;
+                if (TryApplyAll(ifmName, val)) continue;
 
                 // 2. マッピングテーブルで変換してマッチ
                 if (NameMapping.TryGetValue(ifmName, out string arKitName))
-                    TryApply(arKitName, val);
+                    TryApplyAll(arKitName, val);
             }
         }
 
-        private bool TryApply(string blendShapeName, float val)
+        private bool TryApplyAll(string blendShapeName, float val)
         {
-            if (!blendShapeCache.TryGetValue(blendShapeName, out var entry))
+            if (!blendShapeCache.TryGetValue(blendShapeName, out var entries))
                 return false;
 
-            entry.smr.SetBlendShapeWeight(entry.idx, val);
+            foreach (var (smr, idx) in entries)
+                smr.SetBlendShapeWeight(idx, val);
+
             return true;
         }
     }
