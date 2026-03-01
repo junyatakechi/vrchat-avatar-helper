@@ -11,14 +11,11 @@ namespace JayT.VRChatAvatarHelper.Facial
 {
     /// <summary>
     /// iFacialMocapから受信したデータをアバターのBlendShapeに適用します。
-    /// アバターごとに個別のマッピング上書きが設定できます。
+    /// アバターごとに個別のマッピング上書きとリミッターが設定できます。
     /// </summary>
     public class IFacialMocapBlendShapeApplier : MonoBehaviour
     {
-        /// <summary>
-        /// iFacialMocapパラメーター名 → アバター側BlendShape名 の1エントリ。
-        /// ifmName はInspectorのドロップダウンで選択できます。
-        /// </summary>
+        /// <summary>iFacialMocapパラメーター名 → アバター側BlendShape名 の1エントリ</summary>
         [Serializable]
         public struct MappingEntry
         {
@@ -28,6 +25,18 @@ namespace JayT.VRChatAvatarHelper.Facial
             public string blendShapeName;
         }
 
+        /// <summary>iFacialMocapパラメーターの値を [min, max] でクランプするリミッター</summary>
+        [Serializable]
+        public struct LimitEntry
+        {
+            [Tooltip("リミッターを適用するiFacialMocapパラメーター名 (ドロップダウンで選択)")]
+            public string ifmName;
+            [Tooltip("値の最小値 (iFacialMocapの生値は0–100)")]
+            public float min;
+            [Tooltip("値の最大値 (iFacialMocapの生値は0–100)")]
+            public float max;
+        }
+
         /// <summary>アバター1体分の設定</summary>
         [Serializable]
         public class AvatarTarget
@@ -35,10 +44,13 @@ namespace JayT.VRChatAvatarHelper.Facial
             [Tooltip("BlendShapeを適用するSkinnedMeshRenderer")]
             public SkinnedMeshRenderer renderer;
 
-            [Tooltip("このアバター固有のマッピング上書き。\n" +
-                     "固定テーブルより優先されます。\n" +
+            [Tooltip("このアバター固有のマッピング上書き。固定テーブルより優先されます。\n" +
                      "左: iFacialMocap名 / 右: アバター側BlendShape名")]
             public MappingEntry[] mappingOverrides;
+
+            [Tooltip("このアバター固有のリミッター。weightScale適用前の生値(0–100)をクランプします。\n" +
+                     "左: iFacialMocap名 / 中: 最小値 / 右: 最大値")]
+            public LimitEntry[] limiters;
         }
 
         [Header("Source")]
@@ -50,7 +62,7 @@ namespace JayT.VRChatAvatarHelper.Facial
         public AvatarTarget[] avatarTargets;
 
         [Header("Settings")]
-        [Tooltip("BlendShape値の倍率 (iFacialMocapは0–100スケール)")]
+        [Tooltip("BlendShape値のグローバル倍率。リミッター適用後に掛け算されます。")]
         [Range(0f, 2f)]
         public float weightScale = 1f;
 
@@ -99,8 +111,9 @@ namespace JayT.VRChatAvatarHelper.Facial
         private class AvatarCache
         {
             public SkinnedMeshRenderer smr;
-            public Dictionary<string, int>    blendShapeIndex; // BlendShape名 → インデックス
-            public Dictionary<string, string> overrideMap;     // ifmName → BlendShape名 (per-avatar)
+            public Dictionary<string, int>              blendShapeIndex; // BlendShape名 → インデックス
+            public Dictionary<string, string>           overrideMap;     // ifmName → BlendShape名
+            public Dictionary<string, (float min, float max)> limiterMap; // ifmName → (min, max)
         }
 
         private List<AvatarCache> avatarCaches;
@@ -136,6 +149,7 @@ namespace JayT.VRChatAvatarHelper.Facial
                     smr             = target.renderer,
                     blendShapeIndex = new Dictionary<string, int>(StringComparer.Ordinal),
                     overrideMap     = new Dictionary<string, string>(StringComparer.Ordinal),
+                    limiterMap      = new Dictionary<string, (float, float)>(StringComparer.Ordinal),
                 };
 
                 var mesh = target.renderer.sharedMesh;
@@ -148,6 +162,15 @@ namespace JayT.VRChatAvatarHelper.Facial
                     {
                         if (!string.IsNullOrEmpty(entry.ifmName) && !string.IsNullOrEmpty(entry.blendShapeName))
                             cache.overrideMap[entry.ifmName] = entry.blendShapeName;
+                    }
+                }
+
+                if (target.limiters != null)
+                {
+                    foreach (var entry in target.limiters)
+                    {
+                        if (!string.IsNullOrEmpty(entry.ifmName))
+                            cache.limiterMap[entry.ifmName] = (entry.min, entry.max);
                     }
                 }
 
@@ -176,8 +199,7 @@ namespace JayT.VRChatAvatarHelper.Facial
                 if (!float.TryParse(valueStr, NumberStyles.Float, CultureInfo.InvariantCulture, out float val))
                     continue;
 
-                val *= weightScale;
-
+                // weightScale はアバターごとのリミッター適用後に掛けるため、ここでは生値を渡す
                 foreach (var cache in avatarCaches)
                     ApplyToAvatar(cache, ifmName, val);
             }
@@ -185,17 +207,24 @@ namespace JayT.VRChatAvatarHelper.Facial
 
         private void ApplyToAvatar(AvatarCache cache, string ifmName, float val)
         {
-            // 1. アバター固有のOverride (最優先)
+            // 1. アバター固有のリミッター (生値 0–100 に対してクランプ)
+            if (cache.limiterMap.TryGetValue(ifmName, out var limit))
+                val = Mathf.Clamp(val, limit.min, limit.max);
+
+            // 2. グローバル倍率
+            val *= weightScale;
+
+            // 3. アバター固有のOverride (最優先)
             if (cache.overrideMap.TryGetValue(ifmName, out string overrideName))
             {
                 TryApply(cache, overrideName, val);
                 return;
             }
 
-            // 2. 直接マッチ
+            // 4. 直接マッチ
             if (TryApply(cache, ifmName, val)) return;
 
-            // 3. 固定マッピングテーブル
+            // 5. 固定マッピングテーブル
             if (NameMapping.TryGetValue(ifmName, out string arKitName))
                 TryApply(cache, arKitName, val);
         }
@@ -211,14 +240,10 @@ namespace JayT.VRChatAvatarHelper.Facial
     }
 
 #if UNITY_EDITOR
-    /// <summary>
-    /// MappingEntry の ifmName をドロップダウンで選択できるようにするPropertyDrawer。
-    /// </summary>
-    [CustomPropertyDrawer(typeof(IFacialMocapBlendShapeApplier.MappingEntry))]
-    public class MappingEntryDrawer : PropertyDrawer
+    // iFacialMocapが送りうる全パラメーター名 (MappingEntryDrawer と LimitEntryDrawer で共有)
+    internal static class IFacialMocapIfmNames
     {
-        // iFacialMocapが送りうる全パラメーター名
-        private static readonly string[] IfmNames = new string[]
+        internal static readonly string[] All = new string[]
         {
             // iFacialMocap省略名 (_L/_R形式)
             "eyeBlink_L",       "eyeBlink_R",
@@ -269,6 +294,44 @@ namespace JayT.VRChatAvatarHelper.Facial
             "mouthStretchLeft",   "mouthStretchRight",
         };
 
+        /// <summary>
+        /// ifmName プロパティをポップアップで描画する共通処理。
+        /// リストにない値は先頭に "(カスタム: xxx)" として表示し、選択変更まで値を維持する。
+        /// </summary>
+        internal static void DrawIfmNamePopup(Rect rect, SerializedProperty ifmProp)
+        {
+            string current    = ifmProp.stringValue ?? "";
+            int    currentIdx = Array.IndexOf(All, current);
+
+            string[] displayNames;
+            int      displayIdx;
+            if (currentIdx >= 0)
+            {
+                displayNames = All;
+                displayIdx   = currentIdx;
+            }
+            else
+            {
+                displayNames    = new string[All.Length + 1];
+                displayNames[0] = string.IsNullOrEmpty(current) ? "(選択してください)" : $"(カスタム: {current})";
+                Array.Copy(All, 0, displayNames, 1, All.Length);
+                displayIdx = 0;
+            }
+
+            int selected = EditorGUI.Popup(rect, displayIdx, displayNames);
+
+            if (currentIdx >= 0)
+                ifmProp.stringValue = All[selected];
+            else if (selected > 0)
+                ifmProp.stringValue = All[selected - 1];
+            // selected == 0 (カスタム値) のときは値を維持
+        }
+    }
+
+    /// <summary>MappingEntry の ifmName をドロップダウンで描画する PropertyDrawer</summary>
+    [CustomPropertyDrawer(typeof(IFacialMocapBlendShapeApplier.MappingEntry))]
+    public class MappingEntryDrawer : PropertyDrawer
+    {
         public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
             EditorGUI.BeginProperty(position, label, property);
@@ -280,43 +343,68 @@ namespace JayT.VRChatAvatarHelper.Facial
             var leftRect  = new Rect(position.x,             position.y, half, position.height);
             var rightRect = new Rect(position.x + half + 4f, position.y, half, position.height);
 
-            // ifmName: Popup。リストにない値は "(カスタム: xxx)" として先頭に表示
-            string current    = ifmProp.stringValue ?? "";
-            int    currentIdx = Array.IndexOf(IfmNames, current);
-
-            string[] displayNames;
-            int      displayIdx;
-            if (currentIdx >= 0)
-            {
-                displayNames = IfmNames;
-                displayIdx   = currentIdx;
-            }
-            else
-            {
-                displayNames    = new string[IfmNames.Length + 1];
-                displayNames[0] = string.IsNullOrEmpty(current) ? "(選択してください)" : $"(カスタム: {current})";
-                Array.Copy(IfmNames, 0, displayNames, 1, IfmNames.Length);
-                displayIdx = 0;
-            }
-
-            int selected = EditorGUI.Popup(leftRect, displayIdx, displayNames);
-
-            if (currentIdx >= 0)
-                ifmProp.stringValue = IfmNames[selected];
-            else if (selected > 0)
-                ifmProp.stringValue = IfmNames[selected - 1];
-            // selected == 0 (カスタム値) の場合は値を維持
-
-            // blendShapeName: テキストフィールド
+            IFacialMocapIfmNames.DrawIfmNamePopup(leftRect, ifmProp);
             bsProp.stringValue = EditorGUI.TextField(rightRect, bsProp.stringValue ?? "");
 
             EditorGUI.EndProperty();
         }
 
         public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
+            => EditorGUIUtility.singleLineHeight;
+    }
+
+    /// <summary>LimitEntry の ifmName をドロップダウン、min/max をフィールドで描画する PropertyDrawer</summary>
+    [CustomPropertyDrawer(typeof(IFacialMocapBlendShapeApplier.LimitEntry))]
+    public class LimitEntryDrawer : PropertyDrawer
+    {
+        public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
-            return EditorGUIUtility.singleLineHeight;
+            EditorGUI.BeginProperty(position, label, property);
+
+            var ifmProp = property.FindPropertyRelative("ifmName");
+            var minProp = property.FindPropertyRelative("min");
+            var maxProp = property.FindPropertyRelative("max");
+
+            float w         = position.width;
+            float sepW      = 6f;
+            float labelW    = 24f;
+            float numW      = (w * 0.5f - sepW - labelW * 2f) * 0.5f;
+            float popupW    = w * 0.5f;
+
+            float x = position.x;
+            float y = position.y;
+            float h = position.height;
+
+            // [ifmName popup (50%)] [" min" label] [min float] [" ~ "] [max float]
+            var popupRect = new Rect(x, y, popupW - sepW, h);
+            x += popupW;
+
+            var minLabelRect = new Rect(x, y, labelW, h);
+            x += labelW;
+            var minRect = new Rect(x, y, numW, h);
+            x += numW + 2f;
+
+            var sepRect = new Rect(x, y, labelW, h);
+            x += labelW;
+            var maxRect = new Rect(x, y, numW, h);
+
+            IFacialMocapIfmNames.DrawIfmNamePopup(popupRect, ifmProp);
+
+            EditorGUI.LabelField(minLabelRect, "min");
+            minProp.floatValue = EditorGUI.FloatField(minRect, minProp.floatValue);
+
+            EditorGUI.LabelField(sepRect, "~");
+            maxProp.floatValue = EditorGUI.FloatField(maxRect, maxProp.floatValue);
+
+            // min <= max を保証
+            if (minProp.floatValue > maxProp.floatValue)
+                maxProp.floatValue = minProp.floatValue;
+
+            EditorGUI.EndProperty();
         }
+
+        public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
+            => EditorGUIUtility.singleLineHeight;
     }
 #endif
 }
