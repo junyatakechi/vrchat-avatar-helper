@@ -70,7 +70,7 @@ namespace JayT.VRChatAvatarHelper.Facial
         [Header("Settings")]
         [Tooltip("トラッキング生値 (0–100) に最前段で掛ける倍率。\n" +
                  "例: 0.5 で動きを抑制、1.5 で大げさに。リミッターはこの後に適用されます。")]
-        [Range(0f, 4f)]
+        [Range(0f, 3f)]
         public float weightTrackingScale = 1f;
 
         // iFacialMocap省略名 (_L/_R) → ARKit標準名 (Left/Right) の固定マッピング
@@ -242,7 +242,7 @@ namespace JayT.VRChatAvatarHelper.Facial
             if (!cache.blendShapeIndex.TryGetValue(blendShapeName, out int idx))
                 return false;
 
-            cache.smr.SetBlendShapeWeight(idx, val);
+            cache.smr.SetBlendShapeWeight(idx, Mathf.Clamp(val, 0f, 100f));
             return true;
         }
     }
