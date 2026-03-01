@@ -47,6 +47,9 @@ namespace JayT.VRChatAvatarHelper.Facial
         private readonly Queue<string> incomingQueue = new Queue<string>();
         private readonly object queueLock = new object();
 
+        // iFacialMocapデータ受信時に発火するイベント (メインスレッドから呼ばれます)
+        public event Action<string> OnDataReceived;
+
         // Magic string for iFacialMocap (UDP)
         private const string udpMagic = "iFacialMocap_sahuasouryya9218sauhuiayeta91555dy3719";
         private const int iPhonePort = 49983;
@@ -109,6 +112,8 @@ namespace JayT.VRChatAvatarHelper.Facial
         // データ解析用（簡易実装）
         private void ParseAndApplyData(string data)
         {
+            OnDataReceived?.Invoke(data);
+
             // ここでBlendShapeやボーン情報をパースしてアバターに適用します
             // 今回はデバッグログに一部を表示するのみとします
             if (showDebugLog && receivedPacketCount % 60 == 0) // 60フレームに1回ログ表示
